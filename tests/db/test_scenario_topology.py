@@ -31,11 +31,14 @@ def test_build_creates_30x8(sources_imported):
             text("SELECT count(*) FROM machines WHERE instance_id=:i"), {"i": sid}
         ).scalar_one()
         src = c.execute(
-            text("SELECT count(*) FROM scenario_sources WHERE scenario_id=:i"),
+            text(
+                "SELECT count(*) FROM scenario_sources WHERE scenario_id=:i "
+                "AND contribution_type='topology'"
+            ),
             {"i": sid},
         ).scalar_one()
     assert (jobs, machines) == (30, 8)
-    assert src == 1
+    assert src == 1  # Task 11+ add further contributions; topology stays exactly one
 
 
 def _snapshot_topology():

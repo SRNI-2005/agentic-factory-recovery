@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from coe.db.models.provenance import Instance, ScenarioSource
 from coe.db.session import session_scope
+from coe.scenario.add_job_attributes import add_job_attributes
 from coe.scenario.topology_sampler import sample_topology
 
 
@@ -70,7 +71,7 @@ def build_scenario(name: str = "factory_demo_01", seed: int = 42) -> int:
         )
 
         # Later tasks insert their transformations here, in this order:
-        #   add_job_attributes(...)      (Task 11)
+        add_job_attributes(session, scenario.id, source_instance_id=mk01.id, seed=seed + 1)
         #   add_workers(...)             (Task 12)
         #   add_availability_windows(...)  (Task 12)
         #   add_families_and_setups(...) (Task 13)
