@@ -62,7 +62,7 @@ class Job(Base):
     instance_id: Mapped[int] = mapped_column(ForeignKey("instances.id"), index=True)
     source_id: Mapped[str | None] = mapped_column(String(60))
     name: Mapped[str] = mapped_column(String(120))
-    job_family_id: Mapped[int | None]
+    job_family_id: Mapped[int | None] = mapped_column(ForeignKey("job_families.id"))
     release_time: Mapped[int] = mapped_column(default=0)
     deadline: Mapped[int | None]
     priority: Mapped[int] = mapped_column(default=1)
@@ -92,7 +92,7 @@ class Operation(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"))
     source_id: Mapped[str | None] = mapped_column(String(60))
     sequence_number: Mapped[int] = mapped_column(Integer)
-    required_role_id: Mapped[int | None]
+    required_role_id: Mapped[int | None] = mapped_column(ForeignKey("worker_roles.id"))
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
 
 
