@@ -2,7 +2,9 @@ from sqlalchemy.orm import Session
 
 from coe.db.models.provenance import Instance, ScenarioSource
 from coe.db.session import session_scope
+from coe.scenario.add_failures import add_maintenance_windows
 from coe.scenario.add_job_attributes import add_job_attributes
+from coe.scenario.add_setup_times import add_families_and_setups
 from coe.scenario.add_workers import add_workers
 from coe.scenario.topology_sampler import sample_topology
 
@@ -74,8 +76,8 @@ def build_scenario(name: str = "factory_demo_01", seed: int = 42) -> int:
         # Later tasks insert their transformations here, in this order:
         add_job_attributes(session, scenario.id, source_instance_id=mk01.id, seed=seed + 1)
         add_workers(session, scenario.id, nouri_source_id=nouri.id, seed=seed + 2)
-        #   add_families_and_setups(...) (Task 13)
-        #   add_maintenance_windows(...) (Task 13)
+        add_families_and_setups(session, scenario.id, gass_source_id=gass.id, seed=seed + 3)
+        add_maintenance_windows(session, scenario.id, seed=seed + 4)
         #   add_materials(...)           (Task 14)
         #   normalize_times(...)         (Task 14)
 
