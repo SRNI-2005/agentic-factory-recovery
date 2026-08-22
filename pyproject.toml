@@ -26,4 +26,5 @@ packages = ["coe"]
 testpaths = ["tests"]
 markers = [
     "db: tests requiring Dockerized TimescaleDB (docker compose up -d first)",
+    "mqtt: tests also requiring Mosquitto reachable at MQTT_HOST/MQTT_PORT",
 ]

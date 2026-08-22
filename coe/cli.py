@@ -34,6 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
     db_sub = db.add_subparsers(dest="db_cmd", required=True)
     db_sub.add_parser("reset")   # destructive dev-only
 
+    mq = sub.add_parser("mqtt")
+    mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
+    tf = mq_sub.add_parser("test-failure")
+    tf.add_argument("--instance", default="factory_demo_01")
+    tf.add_argument("--machine", default="M3")
+    tf.add_argument("--at", type=int, default=512)
+
     return parser
 
 
@@ -81,6 +88,39 @@ def main(argv=None) -> None:
 
             reset_database()
             print("database reset")
+
+    elif args.group == "mqtt":
+        if args.mqtt_cmd == "test-failure":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_failure
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            mid = publish_failure(args.instance, args.machine, occurred_at=args.at)
+            deadline = time.time() + 5
+            engine = make_engine()
+            found = False
+            while time.time() < deadline and not found:
+                with engine.begin() as c:
+                    n = c.execute(
+                        text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid"
+                        ),
+                        {"inst": args.instance, "mid": mid},
+                    ).scalar_one()
+                found = n == 1
+                if not found:
+                    time.sleep(0.25)
+            handle.stop()
+            if found:
+                print(f"OK: telemetry id stored once for message {mid}")
+                raise SystemExit(0)
+            raise SystemExit("FAIL: event did not reach telemetry_events within 5s")
 
 
 if __name__ == "__main__":
