@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -31,3 +32,8 @@ def db_url() -> str:
 def clean_db(db_url):
     reset_database(db_url)
     yield db_url
+
+
+@pytest.fixture(scope="session")
+def data_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "data"
