@@ -44,11 +44,11 @@ def test_full_build_is_byte_reproducible(clean_db):
         eng = create_engine(get_settings().database_url)
         tables = [
             ("machines", "name"), ("jobs", "name"), ("operations", "id"),
-            ("operation_machine_alternatives", "operation_id"),
+            ("operation_machine_alternatives", "operation_id, machine_id"),
             ("workers", "name"), ("worker_roles", "role_name"),
-            ("operation_machine_worker_times", "operation_id"),
+            ("operation_machine_worker_times", "operation_id, machine_id, worker_id"),
             ("worker_availability_windows", "id"), ("job_families", "name"),
-            ("setup_times", "id"), ("materials", "sku"), ("operation_bom", "operation_id"),
+            ("setup_times", "id"), ("materials", "sku"), ("operation_bom", "operation_id, material_id"),
             ("material_receipts", "id"), ("machine_downtime_windows", "id"),
             ("scenario_sources", "id"),
         ]
