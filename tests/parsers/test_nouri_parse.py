@@ -33,3 +33,8 @@ def test_worker_out_of_range_rejected():
 def test_trailing_tokens_rejected():
     with pytest.raises(SourceParseError, match="trailing"):
         parse_nouri("1 1 1\n1 1 1 1 1 5\n7\n")
+
+
+def test_zero_worker_count_rejected():
+    with pytest.raises(SourceParseError, match="at least one worker"):
+        parse_nouri("1 1 1\n1 1 1 0\n")

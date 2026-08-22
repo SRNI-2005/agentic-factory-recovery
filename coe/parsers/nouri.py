@@ -84,6 +84,10 @@ def parse_nouri(raw: str) -> ParsedNouriInstance:
             for _ in range(k):
                 m, ml = nxt(f"job {j + 1} op {o + 1} machine number")
                 w_count, _ = nxt(f"job {j + 1} op {o + 1} worker count")
+                if w_count <= 0:
+                    raise SourceParseError(
+                        f"job {j + 1} op {o + 1}: machine {m} must list at least one worker"
+                    )
                 if not 0 <= m - 1 < n_machines:
                     raise SourceParseError(
                         f"line {ml}: machine {m} outside 1..{n_machines}"
