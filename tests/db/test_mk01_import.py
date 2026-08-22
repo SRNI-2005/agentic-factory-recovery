@@ -57,6 +57,36 @@ def test_reimport_is_noop(clean_db):
     assert _counts(clean_db)["instances"] == 1
 
 
+def test_changed_checksum_creates_variant_instance(clean_db, tmp_path):
+    from coe.db.models.provenance import Instance
+    from coe.db.session import session_scope
+    from coe.parsers.mk01 import import_mk01
+
+    a = import_mk01(MK01_PATH, instance_name="mk01")
+
+    tokens = MK01_PATH.read_text().split()
+    tokens[-1] = str(int(tokens[-1]) + 1) if int(tokens[-1]) > 0 else str(
+        int(tokens[-1]) - 2
+    )
+    mutated = tmp_path / "mk01.txt"
+    mutated.write_text(" ".join(tokens))
+
+    b = import_mk01(mutated, instance_name="mk01")
+    assert b != a
+
+    with session_scope() as session:
+        original = session.query(Instance).filter(Instance.name == "mk01").one()
+        variant = (
+            session.query(Instance).filter(Instance.name.like("mk01@%")).one_or_none()
+        )
+        assert variant is not None
+        assert len(variant.name.split("@")[1]) == 8
+        assert variant.source_checksum != original.source_checksum
+
+    assert import_mk01(MK01_PATH, instance_name="mk01") == a
+    assert _counts(clean_db)["instances"] == 2
+
+
 def test_failed_import_leaves_no_partial_instance(clean_db):
     bad = Path("tests/fixtures/bad_mk01.txt")
     bad.parent.mkdir(exist_ok=True)
