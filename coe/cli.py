@@ -1,4 +1,5 @@
 import argparse
+import subprocess
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     db = sub.add_parser("db")
     db_sub = db.add_subparsers(dest="db_cmd", required=True)
     db_sub.add_parser("reset")   # destructive dev-only
+    db_sub.add_parser("migrate")
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
@@ -88,6 +90,10 @@ def main(argv=None) -> None:
 
             reset_database()
             print("database reset")
+
+        if args.db_cmd == "migrate":
+            subprocess.run(["uv", "run", "alembic", "upgrade", "head"], check=True)
+            print("migrations applied")
 
     elif args.group == "mqtt":
         if args.mqtt_cmd == "test-failure":
