@@ -1,0 +1,31 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: coe
+      POSTGRES_PASSWORD: coe
+      POSTGRES_DB: coe
+    ports:
+      - "5432:5432"
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coe -d coe"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -t '$$SYS/broker/version' -C 1 -W 5"]
+      interval: 5s
+      timeout: 6s
+      retries: 12
+
+volumes:
+  tsdata:
