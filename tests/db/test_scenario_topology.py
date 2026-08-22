@@ -38,6 +38,59 @@ def test_build_creates_30x8(sources_imported):
     assert src == 1
 
 
+def _snapshot_topology():
+    from coe.config import get_settings
+
+    eng = create_engine(get_settings().database_url)
+    with eng.begin() as c:
+        iid = c.execute(
+            text("SELECT id FROM instances WHERE name='factory_demo_01'")
+        ).scalar_one()
+        jobs = c.execute(
+            text(
+                "SELECT j.name, count(o.id) FROM jobs j "
+                "LEFT JOIN operations o ON o.job_id = j.id "
+                "WHERE j.instance_id = :i GROUP BY j.name ORDER BY j.name"
+            ),
+            {"i": iid},
+        ).all()
+        alts = c.execute(
+            text(
+                "SELECT operation_id, machine_id, processing_time "
+                "FROM operation_machine_alternatives WHERE instance_id = :i "
+                "ORDER BY operation_id, machine_id"
+            ),
+            {"i": iid},
+        ).all()
+    eng.dispose()
+    return jobs, alts
+
+
+def _import_sources():
+    from coe.parsers.gass import import_gass
+    from coe.parsers.mk01 import import_mk01
+    from coe.parsers.nouri import import_nouri
+
+    import_mk01(Path("data/raw/mk01/mk01.txt"))
+    import_nouri(Path("data/raw/nouri-fjspw/extracted/SFJW/SFJW-01.txt"))
+    import_gass(Path("data/raw/gass"))
+
+
+def test_topology_deterministic_same_seed(sources_imported):
+    from coe.db.admin import reset_database
+    from coe.scenario.build import build_scenario
+
+    build_scenario("factory_demo_01", seed=42)
+    first = _snapshot_topology()
+
+    reset_database()
+    _import_sources()
+    build_scenario("factory_demo_01", seed=42)
+    second = _snapshot_topology()
+
+    assert first == second
+
+
 def test_duplicate_name_refused(sources_imported):
     from coe.scenario.build import ScenarioError, build_scenario
 

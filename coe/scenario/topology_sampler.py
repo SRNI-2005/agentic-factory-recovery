@@ -16,13 +16,17 @@ def _extract_profiles(session: Session, source_instance_id: int) -> dict:
         len(jobs)
         for jobs in (
             session.scalars(
-                select(Operation.id).where(
+                select(Operation.id)
+                .where(
                     Operation.instance_id == source_instance_id,
                     Operation.job_id == jid,
                 )
+                .order_by(Operation.id)
             ).all()
             for jid in session.scalars(
-                select(Job.id).where(Job.instance_id == source_instance_id)
+                select(Job.id)
+                .where(Job.instance_id == source_instance_id)
+                .order_by(Job.id)
             ).all()
         )
     ]
@@ -32,7 +36,13 @@ def _extract_profiles(session: Session, source_instance_id: int) -> dict:
         select(
             OperationMachineAlternative.operation_id,
             OperationMachineAlternative.processing_time,
-        ).where(OperationMachineAlternative.instance_id == source_instance_id)
+        )
+        .where(OperationMachineAlternative.instance_id == source_instance_id)
+        .order_by(
+            OperationMachineAlternative.operation_id,
+            OperationMachineAlternative.machine_id,
+            OperationMachineAlternative.processing_time,
+        )
     ).all()
     per_op: dict[int, int] = {}
     for op_id, t in rows:
