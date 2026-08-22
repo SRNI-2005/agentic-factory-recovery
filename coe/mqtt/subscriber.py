@@ -33,6 +33,8 @@ def _on_message(client, userdata, msg) -> None:
         # Unresolvable payloads cannot populate telemetry_events.machine_id;
         # they are logged loudly instead (documented limitation).
         print(f"[subscriber] REJECTED: {exc}")
+    except Exception as exc:  # keep the network thread alive no matter what
+        print(f"[subscriber] ERROR ingesting event: {exc!r}")
 
 
 def run_subscriber() -> SubscriberHandle:
