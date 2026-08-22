@@ -21,6 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="import every *.txt under this dir as its own instance",
     )
 
+    gass = sources.add_parser("gass")
+    gass.add_argument("--dir", default="data/raw/gass")
+
     return parser
 
 
@@ -48,6 +51,11 @@ def main(argv=None) -> None:
 
             instance_id = import_mk01(Path(args.path))
             print(f"instance id={instance_id}")
+
+        if args.source == "gass":
+            from coe.parsers.gass import import_gass
+
+            print(f"instance id={import_gass(Path(args.dir))}")
 
 
 if __name__ == "__main__":
