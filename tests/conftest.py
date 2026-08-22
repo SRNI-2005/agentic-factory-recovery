@@ -1,26 +1,9 @@
-import subprocess
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
 
+from coe.db.admin import reset_database  # noqa: F401  (re-exported for fixtures)
 from coe.config import get_settings
-
-
-def reset_database(url: str) -> None:
-    """Drop every user table in public, then rebuild via Alembic (authoritative DDL)."""
-    eng = create_engine(url)
-    with eng.begin() as conn:
-        conn.execute(
-            text(
-                "DO $do$ DECLARE r record; BEGIN "
-                "FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='public' LOOP "
-                "EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE'; "
-                "END LOOP; END $do$;"
-            )
-        )
-    eng.dispose()
-    subprocess.run(["uv", "run", "alembic", "upgrade", "head"], check=True)
 
 
 @pytest.fixture(scope="session")
