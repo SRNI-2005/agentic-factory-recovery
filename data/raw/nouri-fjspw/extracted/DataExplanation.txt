@@ -1,0 +1,20 @@
+For the data explanation, we considered as example, from the small set SFJW, the first data instance SFJW 01 
+which can be understood as follows. Firstly, the three values in the first row represent the number of jobs, 
+machines and workers respectively. Secondly, the values in the other rows describe the processing time of all 
+operations on each available machine assigned to each available worker, where the fist value denotes the number 
+of operations in the corresponding job, and the second value means the number of available machines for the first 
+operation followed by machine number. For each machine number, the next value is the number of available workers 
+able to control it, and followed by a group of combinations (worker, processing time) that indicate the processing 
+time for each selected worker: 
+
+2 2 2
+2 2 1 2 1 25 2 30 2 1 1 37 2 1 1 2 32 2 2 1 24 2 33
+2 2 1 1 1 45 2 2 1 55 2 65 2 1 2 1 21 2 25 2 1 2 65
+
+The values in the first row mean that there are 2 jobs, 2 machines and 2 workers in the instance. 
+In the second row, the first value 2 denotes that there are 2 operations in job 1 and the second value 2 
+means that 2 machines are available to process O11: where the first machine 1 can be controlled by 2 workers, 
+the worker 1 with a processing time of 25 and the worker 2 with 30. The next machine 2, can be controlled by 
+1 worker which is worker 1 with a processing time of 37. For the second operation O12, 2 machines are available: 
+the machine 1 can be controlled by only 1 worker which is worker 2 with a processing time of 32, and the machine 2 
+is composed by 2 workers, the worker 1 with a processing time of 24 and the worker 2 with a processing time of 33.   
