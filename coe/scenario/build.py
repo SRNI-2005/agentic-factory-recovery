@@ -4,8 +4,10 @@ from coe.db.models.provenance import Instance, ScenarioSource
 from coe.db.session import session_scope
 from coe.scenario.add_failures import add_maintenance_windows
 from coe.scenario.add_job_attributes import add_job_attributes
+from coe.scenario.add_materials import add_materials
 from coe.scenario.add_setup_times import add_families_and_setups
 from coe.scenario.add_workers import add_workers
+from coe.scenario.normalize_time import normalize_times
 from coe.scenario.topology_sampler import sample_topology
 
 
@@ -78,8 +80,8 @@ def build_scenario(name: str = "factory_demo_01", seed: int = 42) -> int:
         add_workers(session, scenario.id, nouri_source_id=nouri.id, seed=seed + 2)
         add_families_and_setups(session, scenario.id, gass_source_id=gass.id, seed=seed + 3)
         add_maintenance_windows(session, scenario.id, seed=seed + 4)
-        #   add_materials(...)           (Task 14)
-        #   normalize_times(...)         (Task 14)
+        add_materials(session, scenario.id, seed=seed + 5)
+        normalize_times(session, scenario.id)
 
         session.flush()
         return scenario.id
