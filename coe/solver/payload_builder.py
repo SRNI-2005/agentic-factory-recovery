@@ -321,9 +321,14 @@ def build_payload(
          "reason": w.reason}
         for w in downtime if machine_by_id[w.machine_id] not in stripped
     ]
+    frozen_max_end = max(
+        (e["frozen"]["end"] for entries in ops_by_job.values()
+         for e in entries if e["frozen"] is not None),
+        default=0)
     horizon = compute_horizon(jobs=preview_jobs,
                               machine_downtime=raw_windows,
-                              setup_times=setup_entries)
+                              setup_times=setup_entries,
+                              frozen_max_end=frozen_max_end)
 
     frozen_by_machine: dict[str, list[tuple[int, int]]] = {}
     frozen_by_worker: dict[str, list[tuple[int, int]]] = {}
@@ -431,7 +436,9 @@ def build_payload(
             prev = last_entry.get(ae.machine_id)
             if prev is None or key > prev[0]:
                 last_entry[ae.machine_id] = (key, op_dbid)
-        for mid_, (_key, op_dbid) in last_entry.items():
+        for mid_, (_key, op_dbid) in sorted(last_entry.items()):
+            if machine_by_id[mid_] in stripped:
+                continue
             fam = family_name.get(
                 next(j for j in jobs
                      if j.id == op_by_id[op_dbid].job_id).job_family_id)
