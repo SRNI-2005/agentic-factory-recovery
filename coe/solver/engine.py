@@ -43,13 +43,18 @@ def _effective_beta(payload: dict, job_id: str) -> float:
     return float(weights.get(job_id, payload["config"].get("beta", 1.0)))
 
 
-def _schedule_span(payload: dict, frozen_echo: list) -> int:
+def _schedule_span(payload: dict, frozen_echo: list,
+                   receipt_times: list[int] | None = None,
+                   machine_downtime: list | None = None) -> int:
     """DEVIATION from the brief listing (documented in task-12 report): upper
     bound for CP-SAT variable domains. The §6.7 horizon cannot serve as the
     variable ub: it omits release+processing and frozen-end+processing
     stacking, never sees worker unavailability, and is inflated by long
     downtimes (turning genuinely infeasible payloads feasible). Any schedule
-    can be left-shifted to fit inside this span."""
+    can be left-shifted to fit inside this span. Riders (task-12B): latest
+    counted material receipt must fit inside the domains (waiting for a
+    delivery is schedulable), and TEMPORARY machine downtimes likewise only
+    delay starts; open-ended windows contribute nothing to the bound."""
     release = max((j["release_time"] for j in payload["jobs"]), default=0)
     frozen_end = max((o["frozen"]["end"] for _, o in frozen_echo), default=0)
     processing = 0
@@ -62,8 +67,13 @@ def _schedule_span(payload: dict, frozen_echo: list) -> int:
                      for d in (alt.get("workers") or {}).values()]
             processing += max(durs) if durs else 0
     unavail = sum(uw["until"] - uw["from"]
-                  for uw in payload["worker_unavailability"])
-    return max(1, release + frozen_end + processing + unavail)
+                  for uw in payload["worker_unavailability"]
+                  if uw["until"] is not None)
+    downtime = sum(wdw["until"] - wdw["from"]
+                   for wdw in (machine_downtime or [])
+                   if wdw["until"] is not None)
+    return max(1, release + frozen_end + processing + unavail + downtime
+               + max(receipt_times or [0]))
 
 
 def echo_assignment(job, op) -> dict:
@@ -138,11 +148,16 @@ def solve(payload: dict) -> dict:
         frozen_max_end=max((o["frozen"]["end"] for _, o in frozen_echo),
                            default=0),
     )
-    span = _schedule_span(payload, frozen_echo)
+    span = _schedule_span(
+        payload, frozen_echo,
+        receipt_times=[r["available_at"]
+                       for r in payload.get("material_receipts", [])],
+        machine_downtime=payload["machine_downtime"])
 
     model = CpModel()
     machine_iv: dict[str, list] = {}
     worker_iv: dict[str, list] = {}
+    demands_by_sku: dict[str, list] = {}
 
     # frozen anchors: fixed busy blocks on their resources
     for j, o in frozen_echo:
@@ -194,6 +209,18 @@ def solve(payload: dict) -> dict:
             model.AddExactlyOne([c["lit"] for c in combos])
             combo_by_op[oid_] = combos
 
+            # consumption gated on an any-combo boolean (circuit-presence
+            # implication pattern); events in payload iteration order (§6.11)
+            mats = o.get("materials") or []
+            if mats:
+                b_any = model.NewBoolVar(f"bany_{oid_}")
+                for c in combos:
+                    model.AddImplication(c["lit"], b_any)
+                model.AddBoolOr([c["lit"] for c in combos] + [b_any.Not()])
+                for mat in mats:
+                    demands_by_sku.setdefault(mat["sku"], []).append(
+                        (s, -int(mat["quantity"]), b_any))
+
     # downtime + unavailability as fixed blocks
     for wdw in payload["machine_downtime"]:
         until = wdw["until"] if wdw["until"] is not None else horizon
@@ -202,8 +229,9 @@ def solve(payload: dict) -> dict:
                                   f"dt_{wdw['machine_id']}_{wdw['from']}")
         machine_iv.setdefault(wdw["machine_id"], []).append(iv)
     for i, uw in enumerate(payload["worker_unavailability"]):
-        iv = model.NewIntervalVar(uw["from"], max(1, uw["until"] - uw["from"]),
-                                  uw["until"], f"uw_{uw['worker_id']}_{i}")
+        until = uw["until"] if uw["until"] is not None else horizon
+        iv = model.NewIntervalVar(uw["from"], max(1, until - uw["from"]),
+                                  until, f"uw_{uw['worker_id']}_{i}")
         worker_iv.setdefault(uw["worker_id"], []).append(iv)
 
     for ivs in machine_iv.values():
@@ -212,6 +240,22 @@ def solve(payload: dict) -> dict:
     for ivs in worker_iv.values():
         if len(ivs) > 1:
             model.AddNoOverlap(ivs)
+
+    # ---- temporal material capacity: one reservoir per demanded sku (§6.11)
+    refills_by_sku: dict[str, list] = {}
+    for r in payload.get("material_receipts", []):
+        refills_by_sku.setdefault(r["sku"], []).append(
+            (int(r["available_at"]), int(r["quantity"]), True))
+    cap_by_sku = {m["sku"]: int(m.get("capacity", 0))
+                  for m in payload.get("materials", [])}
+    for sku, events in demands_by_sku.items():
+        events += refills_by_sku.get(sku, [])
+        model.AddReservoirConstraintWithActive(
+            [t for t, _, _ in events],
+            [d for _, d, _ in events],
+            [a for _, _, a in events],
+            -cap_by_sku.get(sku, 0),
+            sum(abs(d) for _, d, _ in events))
 
     # ---- tardiness, makespan, objective ----
     tardy_vars = []

@@ -92,13 +92,15 @@ def test_worker_no_overlap_serializes():
     assert workers == {"W1"}
 
 
-def test_infeasible_reports_without_live_assignments():
+def test_machine_downtime_waited_out():
     p = _fx("release_time")
     p["machine_downtime"] = [{"machine_id": "M0", "from": 0,
                               "until": 100000, "reason": "MAINTENANCE"}]
     sol = solve(p)
-    assert sol["status"] == "INFEASIBLE"
-    assert [a for a in sol["assignments"] if not a["is_frozen"]] == []
+    assert sol["status"] in ("OPTIMAL", "FEASIBLE")
+    live = [a for a in sol["assignments"] if not a["is_frozen"]]
+    assert len(live) == 1
+    assert live[0]["start"] >= 100000
 
 
 def test_invalid_weights_rejected():
@@ -114,3 +116,29 @@ def test_zero_sum_weights_rejected():
     p["config"]["beta"] = 0.0
     with pytest.raises(ValueError):
         solve(p)
+
+
+# --- temporal material capacity (spec §6.11, Amendment 2026-08-24) ---------
+
+def test_material_timing_delays_one_op():
+    sol = solve(_fx("material_timing"))
+    assert sol["status"] in ("OPTIMAL", "FEASIBLE")
+    starts = sorted(a["start"] for a in sol["assignments"])
+    assert starts[0] == 0
+    assert starts[1] >= 500
+
+
+def test_permanent_over_demand_is_infeasible():
+    sol = solve(_fx("over_demand"))
+    assert sol["status"] == "INFEASIBLE"
+    assert [a for a in sol["assignments"] if not a["is_frozen"]] == []
+
+
+def test_unknown_demanded_sku_defaults_to_zero():
+    p = _fx("material_timing")
+    for j in p["jobs"]:
+        for op in j["operations"]:
+            op["materials"] = [{"sku": "GHOST", "quantity": 1}]
+    p.pop("materials", None)
+    p.pop("material_receipts", None)
+    assert solve(p)["status"] == "INFEASIBLE"
