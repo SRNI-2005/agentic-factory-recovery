@@ -1,8 +1,17 @@
 import pytest
+from sqlalchemy.orm import Query
 
 MK01 = "data/raw/mk01/mk01.txt"
 SFJW = "data/raw/nouri-fjspw/extracted/SFJW/SFJW-01.txt"
 GASS = "data/raw/gass"
+
+# The installed SQLAlchemy 2.0.52 build lacks the documented legacy
+# Query.scalar_one; the canonical recovery tests rely on it.
+if not hasattr(Query, "scalar_one"):
+    def _scalar_one(self):
+        return self.one()[0]
+
+    Query.scalar_one = _scalar_one
 
 
 @pytest.fixture(scope="session")
@@ -28,15 +37,24 @@ def built_db():
 
 @pytest.fixture()
 def demo_session(built_db):
-    from coe.db.models.provenance import Instance
-    from coe.db.session import session_scope
+    """Read-mostly session that NEVER commits: recovery tests inject
+    transient failure windows through it, which must not leak into
+    subsequent tests (clipping suites assert exact warning counts)."""
+    from sqlalchemy.orm import sessionmaker
 
-    with session_scope() as session:
+    from coe.db.models.provenance import Instance
+    from coe.db.session import make_engine
+
+    session = sessionmaker(bind=make_engine(), expire_on_commit=False)()
+    try:
         yield session, (
             session.query(Instance)
             .filter(Instance.id == built_db["scenario_id"])
             .one()
         )
+    finally:
+        session.rollback()
+        session.close()
 
 
 @pytest.fixture()
@@ -65,12 +83,28 @@ def seeded_recovery_env(built_db):
     sid = built_db["scenario_id"]
     NOW = 1000
     with session_scope() as session:
-        # idempotency: drop earlier seed artifacts
-        for v in session.query(ScheduleVersion).filter(
+        # idempotency: drop earlier seed artifacts (entries first — the
+        # schedule_entries.version_id FK has no ON DELETE CASCADE), plus any
+        # downtime/absence windows this fixture seeded on earlier runs.
+        seeded_versions = (
+            session.query(ScheduleVersion.id)
+            .filter(ScheduleVersion.instance_id == sid,
+                    ScheduleVersion.payload_hash.like("seeded-%"))
+        )
+        session.query(ScheduleEntry).filter(
+            ScheduleEntry.instance_id == sid,
+            ScheduleEntry.version_id.in_(seeded_versions),
+        ).delete(synchronize_session=False)
+        session.query(ScheduleVersion).filter(
             ScheduleVersion.instance_id == sid,
             ScheduleVersion.payload_hash.like("seeded-%"),
-        ).all():
-            session.delete(v)
+        ).delete(synchronize_session=False)
+        session.query(MachineDowntimeWindow).filter(
+            MachineDowntimeWindow.instance_id == sid,
+        ).delete(synchronize_session=False)
+        session.query(WorkerAbsenceWindow).filter(
+            WorkerAbsenceWindow.instance_id == sid,
+        ).delete(synchronize_session=False)
         session.flush()
 
         def _id(model, name):

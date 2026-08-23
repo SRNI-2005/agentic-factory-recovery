@@ -23,6 +23,7 @@ from coe.db.models.fjsp import (
     SetupTime,
 )
 from coe.db.models.materials import Material, MaterialReceipt, OperationBom
+from coe.db.models.schedule import ScheduleEntry, ScheduleVersion
 from coe.db.models.workers import (
     OperationMachineWorkerTime,
     Worker,
@@ -31,7 +32,7 @@ from coe.db.models.workers import (
 from coe.solver.horizon import compute_horizon
 from coe.solver.identifier import op_id
 from coe.solver.materials_check import evaluate_materials
-from coe.solver.windows import complement, merge_intervals
+from coe.solver.windows import clip_window, complement, merge_intervals
 
 
 def resolve_reference_clock(session, instance_id: int, at: int | None) -> int:
@@ -85,6 +86,27 @@ def _cascade_blocked(ops_by_job: dict[int, list[dict]],
     return blocked
 
 
+def _load_active_snapshot(session, iid: int):
+    """Latest non-rolled-back OPTIMAL/FEASIBLE version + entries indexed by
+    operation db-id (mirrors the §4 active_schedule view semantics)."""
+    version = (
+        session.query(ScheduleVersion)
+        .filter(ScheduleVersion.instance_id == iid,
+                ScheduleVersion.solver_status.in_(("OPTIMAL", "FEASIBLE")),
+                ScheduleVersion.rolled_back.is_(False))
+        .order_by(ScheduleVersion.version_number.desc(),
+                  ScheduleVersion.id.desc()).first()
+    )
+    if version is None:
+        return None, {}
+    entries = (
+        session.query(ScheduleEntry)
+        .filter(ScheduleEntry.version_id == version.id)
+        .order_by(ScheduleEntry.id).all()
+    )
+    return version, {e.operation_id: e for e in entries}
+
+
 def build_payload(
     session,
     *,
@@ -104,8 +126,8 @@ def build_payload(
         .filter(Machine.instance_id == iid)
         .order_by(Machine.id).all()
     )
-    machine_names = [m.name for m in machines]
     machine_by_id = {m.id: m.name for m in machines}
+    machine_names = [m.name for m in machines]
 
     families = (
         session.query(JobFamily).filter(JobFamily.instance_id == iid)
@@ -124,6 +146,72 @@ def build_payload(
         .order_by(Operation.job_id, Operation.sequence_number).all()
     )
     op_by_id = {o.id: o for o in ops}
+    worker_names_by_dbid = dict(
+        session.query(Worker.id, Worker.name)
+        .filter(Worker.instance_id == iid).order_by(Worker.id).all()
+    )
+
+    recovering = schedule_type == "RECOVERY"
+    failed_set = set(failed_machine_names)
+    parent_version_id = None
+    active_by_opid: dict[int, object] = {}
+    if recovering:
+        if now is None:
+            raise ValueError("RECOVERY payloads require a reference clock (now)")
+        unknown = sorted(failed_set - set(machine_names))
+        if unknown:
+            raise ValueError(f"unknown failed machines: {unknown}")
+        parent_version, active_by_opid = _load_active_snapshot(session, iid)
+        if parent_version is None:
+            raise ValueError("RECOVERY requires an existing active schedule")
+        parent_version_id = parent_version.id
+
+    downtime = (
+        session.query(MachineDowntimeWindow)
+        .filter(MachineDowntimeWindow.instance_id == iid)
+        .order_by(MachineDowntimeWindow.machine_id,
+                  MachineDowntimeWindow.downtime_from,
+                  MachineDowntimeWindow.id).all()
+    )
+    open_windows = {w.machine_id for w in downtime if w.downtime_until is None}
+    stripped = {
+        machine_by_id[mid] for mid in open_windows
+        if machine_by_id[mid] in failed_set
+    } if recovering else set()
+    machine_names = [n for n in machine_names if n not in stripped]
+
+    # ---- classify operations against the clock ----
+    truncation: dict[int, int] = {}
+    entry_by_dbid: dict[int, dict] = {}
+    ops_by_job: dict[int, list[dict]] = {}
+    for o in ops:
+        jname = job_name[o.job_id]
+        entry = {
+            "operation_id": op_id(jname, o.sequence_number),
+            "sequence": o.sequence_number,
+            "status": "PENDING",
+            "alternatives": [],
+            "frozen": None,
+        }
+        ae = active_by_opid.get(o.id)
+        if ae is not None:
+            m_ae = machine_by_id[ae.machine_id]
+            w_ae = (worker_names_by_dbid.get(ae.worker_id)
+                    if ae.worker_id is not None else None)
+            if ae.end_time <= now:
+                entry["status"] = "COMPLETED"
+                entry["frozen"] = {"machine_id": m_ae, "worker_id": w_ae,
+                                   "start": ae.start_time, "end": ae.end_time}
+            elif ae.start_time <= now:
+                if m_ae in failed_set:
+                    truncation[o.id] = ae.end_time - now
+                else:
+                    entry["status"] = "IN_PROGRESS"
+                    entry["frozen"] = {"machine_id": m_ae, "worker_id": w_ae,
+                                       "start": ae.start_time,
+                                       "end": ae.end_time}
+        entry_by_dbid[o.id] = entry
+        ops_by_job.setdefault(o.job_id, []).append(entry)
 
     alts = (
         session.query(OperationMachineAlternative)
@@ -131,6 +219,10 @@ def build_payload(
         .order_by(OperationMachineAlternative.operation_id,
                   OperationMachineAlternative.machine_id).all()
     )
+    alt_index: dict[int, list] = {}
+    for a in alts:
+        alt_index.setdefault(a.operation_id, []).append(a)
+
     worker_rows = (
         session.query(OperationMachineWorkerTime, Worker.name)
         .join(Worker, Worker.id == OperationMachineWorkerTime.worker_id)
@@ -144,6 +236,31 @@ def build_payload(
         alt_workers.setdefault((row.operation_id, row.machine_id), {})[wname] = \
             row.processing_time
 
+    for o in ops:
+        entry = entry_by_dbid[o.id]
+        if entry["status"] != "PENDING":
+            continue
+        remaining = truncation.get(o.id)
+        for a in alt_index.get(o.id, []):
+            m_alt = machine_by_id[a.machine_id]
+            if m_alt in stripped:
+                continue
+            workers = dict(alt_workers.get((o.id, a.machine_id), {}))
+            base = a.processing_time
+            level = base
+            if remaining is not None and remaining < base:
+                level = remaining
+                workers = {wk: max(1, round(dv * remaining / base))
+                           for wk, dv in workers.items()}
+            entry["alternatives"].append({
+                "machine_id": m_alt,
+                "processing_time": level,
+                "workers": workers,
+            })
+        if not entry["alternatives"] and recovering:
+            entry["status"] = "BLOCKED"
+            entry["alternatives"] = []
+
     setups = (
         session.query(SetupTime).filter(SetupTime.instance_id == iid)
         .order_by(SetupTime.machine_id, SetupTime.to_family_id,
@@ -155,20 +272,6 @@ def build_payload(
          "to_family": family_name[s.to_family_id],
          "duration": s.setup_duration}
         for s in setups
-    ]
-
-    downtime = (
-        session.query(MachineDowntimeWindow)
-        .filter(MachineDowntimeWindow.instance_id == iid)
-        .order_by(MachineDowntimeWindow.machine_id,
-                  MachineDowntimeWindow.downtime_from,
-                  MachineDowntimeWindow.id).all()
-    )
-    downtime_entries = [
-        {"machine_id": machine_by_id[w.machine_id],
-         "from": w.downtime_from, "until": w.downtime_until,
-         "reason": w.reason}
-        for w in downtime
     ]
 
     availability = (
@@ -185,11 +288,6 @@ def build_payload(
                   WorkerAbsenceWindow.absence_from,
                   WorkerAbsenceWindow.absence_until).all()
     )
-    worker_names = dict(
-        session.query(Worker.id, Worker.name)
-        .filter(Worker.instance_id == iid).order_by(Worker.id).all()
-    )
-
     boms = (
         session.query(OperationBom, Material.sku)
         .join(Material, Material.id == OperationBom.material_id)
@@ -202,7 +300,7 @@ def build_payload(
         oid_ = op_id(job_name[op_row.job_id], op_row.sequence_number)
         bom_by_op.setdefault(oid_, []).append(
             {"sku": sku, "quantity": row.quantity_required})
-    receipts = (
+    receipt_rows = (
         session.query(MaterialReceipt, Material.sku)
         .join(Material, Material.id == MaterialReceipt.material_id)
         .filter(MaterialReceipt.instance_id == iid)
@@ -214,42 +312,54 @@ def build_payload(
         .filter(Material.instance_id == iid).order_by(Material.sku).all()
     )
 
-    # ---- assemble operation dicts (baseline: everything PENDING) ----
-    entry_by_dbid: dict[int, dict] = {}
-    ops_by_job: dict[int, list[dict]] = {}
-    for o in ops:
-        jname = job_name[o.job_id]
-        entry = {
-            "operation_id": op_id(jname, o.sequence_number),
-            "sequence": o.sequence_number,
-            "status": "PENDING",
-            "alternatives": [],
-            "frozen": None,
-        }
-        entry_by_dbid[o.id] = entry
-        ops_by_job.setdefault(o.job_id, []).append(entry)
-
-    alt_index: dict[int, list] = {}
-    for a in alts:
-        alt_index.setdefault(a.operation_id, []).append(a)
-    for o in ops:
-        entry = entry_by_dbid[o.id]
-        for a in alt_index.get(o.id, []):
-            entry["alternatives"].append({
-                "machine_id": machine_by_id[a.machine_id],
-                "processing_time": a.processing_time,
-                "workers": dict(alt_workers.get((o.id, a.machine_id), {})),
-            })
-
     # ---- horizon BEFORE window conversion (tail-coverage amendment) ----
-    payload_jobs_preview = [
-        {"release_time": j.release_time,
-         "operations": [e for e in ops_by_job[j.id]]}
-        for j in jobs
+    preview_jobs = [{"release_time": j.release_time,
+                     "operations": ops_by_job[j.id]} for j in jobs]
+    raw_windows = [
+        {"machine_id": machine_by_id[w.machine_id],
+         "from": w.downtime_from, "until": w.downtime_until,
+         "reason": w.reason}
+        for w in downtime if machine_by_id[w.machine_id] not in stripped
     ]
-    horizon = compute_horizon(jobs=payload_jobs_preview,
-                              machine_downtime=downtime_entries,
+    horizon = compute_horizon(jobs=preview_jobs,
+                              machine_downtime=raw_windows,
                               setup_times=setup_entries)
+
+    frozen_by_machine: dict[str, list[tuple[int, int]]] = {}
+    frozen_by_worker: dict[str, list[tuple[int, int]]] = {}
+    for entries in ops_by_job.values():
+        for e in entries:
+            fz = e["frozen"]
+            if fz is None:
+                continue
+            frozen_by_machine.setdefault(fz["machine_id"], []).append(
+                (fz["start"], fz["end"]))
+            if fz["worker_id"] is not None:
+                frozen_by_worker.setdefault(fz["worker_id"], []).append(
+                    (fz["start"], fz["end"]))
+
+    warnings: list[dict] = []
+    downtime_entries = []
+    for w in raw_windows:
+        s = w["from"]
+        e = w["until"] if w["until"] is not None else horizon
+        outcome = clip_window((s, e), frozen_by_machine.get(w["machine_id"], []))
+        if outcome is None:
+            warnings.append({"type": "DOWNTIME_DROPPED",
+                             "machine_id": w["machine_id"],
+                             "window": [s, e],
+                             "reason": "fully covered by frozen operations"})
+            continue
+        if outcome != (s, e):
+            warnings.append({"type": "DOWNTIME_CLIPPED",
+                             "machine_id": w["machine_id"],
+                             "window": [s, e],
+                             "clipped_to": [outcome[0], outcome[1]],
+                             "reason": "overlaps frozen operations"})
+            s, e = outcome
+        downtime_entries.append({"machine_id": w["machine_id"],
+                                 "from": s, "until": e,
+                                 "reason": w["reason"]})
 
     # ---- worker unavailability: complement within [0, H] + absence rows ----
     avail_by_worker: dict[int, list[tuple[int, int]]] = {}
@@ -264,21 +374,42 @@ def build_payload(
             absence_by_worker.setdefault(w.worker_id, []).append((s, e))
 
     worker_unavailability = []
-    for wid in sorted(worker_names):
+    for wid in sorted(worker_names_by_dbid):
+        wname = worker_names_by_dbid[wid]
         busy = list(absence_by_worker.get(wid, []))
         busy.extend(complement(0, horizon, avail_by_worker.get(wid, [])))
         for us, ue in merge_intervals(busy):
+            outcome = clip_window((us, ue), frozen_by_worker.get(wname, []))
+            if outcome is None:
+                warnings.append({"type": "WORKER_WINDOW_DROPPED",
+                                 "worker_id": wname,
+                                 "window": [us, ue],
+                                 "reason": "fully covered by frozen operations"})
+                continue
+            if outcome != (us, ue):
+                warnings.append({"type": "WORKER_WINDOW_CLIPPED",
+                                 "worker_id": wname,
+                                 "window": [us, ue],
+                                 "clipped_to": [outcome[0], outcome[1]],
+                                 "reason": "overlaps frozen operations"})
+                us, ue = outcome
             worker_unavailability.append(
-                {"worker_id": worker_names[wid], "from": us, "until": ue})
+                {"worker_id": wname, "from": us, "until": ue})
 
-    # ---- material gatekeeping + cascade ----
+    # ---- material gatekeeping + dead-end merge + single cascade ----
     blocks, mat_warnings = evaluate_materials(
         initial_stock=stock_by_sku,
         receipts=[{"sku": sku, "quantity": r.quantity,
-                   "available_at": r.available_at} for r, sku in receipts],
+                   "available_at": r.available_at}
+                  for r, sku in receipt_rows],
         bom_by_op=bom_by_op,
         horizon=horizon,
     )
+    for entries in ops_by_job.values():
+        for e in entries:
+            if e["status"] == "BLOCKED":
+                blocks[e["operation_id"]] = {"reason": "NO_CAPABLE_MACHINES",
+                                             "material_sku": None}
     blocked_map = _cascade_blocked(ops_by_job, blocks)
     blocked_operations = []
     for entries in ops_by_job.values():
@@ -289,8 +420,24 @@ def build_payload(
                 blocked_operations.append(
                     {"operation_id": e["operation_id"],
                      **blocked_map[e["operation_id"]]})
+    warnings.extend(mat_warnings)
 
-    # ---- assemble final payload in §5 key order ----
+    # ---- initial family seeding from the active snapshot ----
+    machine_initial_families: dict[str, str] = {}
+    if recovering:
+        last_entry: dict[int, tuple[tuple[int, int], int]] = {}
+        for op_dbid, ae in active_by_opid.items():
+            key = (ae.end_time, ae.id)
+            prev = last_entry.get(ae.machine_id)
+            if prev is None or key > prev[0]:
+                last_entry[ae.machine_id] = (key, op_dbid)
+        for mid_, (_key, op_dbid) in last_entry.items():
+            fam = family_name.get(
+                next(j for j in jobs
+                     if j.id == op_by_id[op_dbid].job_id).job_family_id)
+            if fam is not None:
+                machine_initial_families[machine_by_id[mid_]] = fam
+
     payload_jobs = []
     for j in jobs:
         payload_jobs.append({
@@ -309,13 +456,13 @@ def build_payload(
     payload = {
         "instance_id": instance_row.name,
         "schedule_type": schedule_type,
-        "parent_version_id": None,
+        "parent_version_id": parent_version_id,
         "config": {"alpha": alpha, "beta": beta,
                    "time_limit_seconds": time_limit_seconds,
                    "normalize_objectives": normalize_objectives},
         "machines": machine_names,
-        "machine_initial_families": {},
-        "warnings": list(mat_warnings),
+        "machine_initial_families": machine_initial_families,
+        "warnings": warnings,
         "jobs": payload_jobs,
         "machine_downtime": downtime_entries,
         "worker_unavailability": worker_unavailability,
