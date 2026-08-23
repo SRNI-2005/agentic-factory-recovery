@@ -168,7 +168,7 @@ Cap exhaustion yields an empty candidate list: the run degrades to a baseline-eq
 
 ### 4.4 Manager Compile
 
-The Manager node assembles the solver payload by invoking the Phase 2 `payload_builder`, then applying only candidates whose latest round verdict is `VALID` or `VALID_WITH_WARNING` through the strategy applier (Section 6). `INVALID` entries remain in state and `recovery_proposals` for audit but are filtered out before the applier runs. Hard constraints come from the database alone; candidates influence only the soft-preference fields listed in Section 5. Every application is recorded in `payload.warnings`.
+The Manager node assembles the solver payload by invoking the Phase 2 `payload_builder`, then applying only candidates whose latest round verdict is `VALID` or `VALID_WITH_WARNING` through the strategy applier (Section 6); the Phase 2 tardiness-weight derivation runs after the applier, using the effective objective weights (Phase 2 §3.1). `INVALID` entries remain in state and `recovery_proposals` for audit but are filtered out before the applier runs. Hard constraints come from the database alone; candidates influence only the soft-preference fields listed in Section 5. Every application is recorded in `payload.warnings`.
 
 ### 4.5 Explanation Service (AI Role 3)
 
@@ -207,7 +207,7 @@ Jobs absent from the map use the global `beta`. The objective becomes `alpha * n
 
 ### 6.1 Applier
 
-A pure module: `(payload, validated_candidates) → transformed_payload`. It performs no validation itself; it assumes candidates passed the catalog validator. Each application appends `{type: STRATEGY_APPLIED, candidate, field_changed}` to `payload.warnings`. Synthetic rows created by `EXPEDITE_MATERIAL` are recorded with `source = 'strategy_agent'` in provenance metadata, per Phase 1's synthetic-labeling rule. Candidates apply in emission order; when two candidates target the same job or material, the later overrides the earlier, and every application is recorded. An exact duplicate proposed within the same round receives verdict `INVALID_DUPLICATE`.
+A pure module: `(payload, validated_candidates) → transformed_payload`. It performs no validation itself; it assumes candidates passed the catalog validator. Each application appends `{type: STRATEGY_APPLIED, candidate, field_changed}` to `payload.warnings`. Synthetic rows created by `EXPEDITE_MATERIAL` are recorded with `source = 'strategy_agent'` in provenance metadata, per Phase 1's synthetic-labeling rule. Candidates apply in emission order; when two candidates target the same job or material, the later overrides the earlier, and every application is recorded. An exact duplicate proposed within the same round receives verdict `INVALID_DUPLICATE`. Ordering contract with Phase 2 *(Amendment 2026-08-23)*: the applier runs strictly before the payload builder's tardiness-weight derivation (Phase 2 §3.1), so derived default weights reflect the post-`WEIGHT_PRESET` effective `alpha`/`beta`, and explicit `TARDINESS_WEIGHT` entries applied here survive as overrides on top of those defaults.
 
 ### 6.2 Pre-Commit Gate
 
