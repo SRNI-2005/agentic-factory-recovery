@@ -48,23 +48,25 @@ def test_normalized_objective_is_ratio():
 
 
 def test_span_admits_three_transition_setup_stack():
-    p = _fx("worker_no_overlap")
-    # rebuild into a 3-job / 1-machine stack with all-pairs setups of 20
+    """3 single-op jobs, one machine, all-pairs setups of 20: legal optimum
+    ends at t=55; the pre-fix span (35) clipped it to false INFEASIBLE."""
     import copy
-    q = copy.deepcopy(p)
+
+    q = copy.deepcopy(_fx("worker_no_overlap"))
     q["machines"] = ["M0"]
-    fams = ["A", "B", "C"]
-    for i, j in enumerate(q["jobs"][:3]):
+    third = copy.deepcopy(q["jobs"][0])
+    third["job_id"] = "J3"
+    third["operations"][0]["operation_id"] = "J3-O1"
+    q["jobs"] = q["jobs"][:2] + [third]
+    for i, j in enumerate(q["jobs"]):
         j["operations"][0]["alternatives"] = [
             {"machine_id": "M0", "processing_time": 5, "workers": {}}]
-        j["family_id"] = fams[i]
-    rows = []
-    for a in fams:
-        for b in fams:
-            if a != b:
-                rows.append({"machine_id": "M0", "from_family": a,
-                             "to_family": b, "duration": 20})
-    q["jobs"] = q["jobs"][:3]
+        j["family_id"] = ["A", "B", "C"][i]
+        j["operations"][0]["frozen"] = None
+    rows = [{"machine_id": "M0", "from_family": a, "to_family": b,
+             "duration": 20}
+            for a in ("A", "B", "C") for b in ("A", "B", "C") if a != b]
     q["setup_times"] = rows
     sol = solve(q)
-    assert sol["status"] in ("OPTIMAL", "FEASIBLE"), sol["status"]
+    assert sol["status"] == "OPTIMAL"
+    assert sol["makespan"] == 55
