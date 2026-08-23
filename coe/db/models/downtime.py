@@ -18,6 +18,15 @@ class TelemetryEvent(Base):
     __table_args__ = (
         CheckConstraint("occurred_at >= 0", name="occurred_nonnegative"),
         CheckConstraint("received_at >= 0", name="received_nonnegative"),
+        CheckConstraint(
+            "((machine_id IS NOT NULL)::int + (worker_id IS NOT NULL)::int "
+            "+ (material_id IS NOT NULL)::int) = 1",
+            name="exactly_one_resource",
+        ),
+        CheckConstraint(
+            "resource_kind IN ('MACHINE','WORKER','MATERIAL')",
+            name="resource_kind_domain",
+        ),
     )
 
     # Composite PK (id, occurred_at) satisfies the TimescaleDB rule that every
@@ -27,7 +36,10 @@ class TelemetryEvent(Base):
     occurred_at: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     instance_id: Mapped[int] = mapped_column(ForeignKey("instances.id"), index=True)
     message_id: Mapped[str] = mapped_column(String(160))
-    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"))
+    machine_id: Mapped[int | None] = mapped_column(ForeignKey("machines.id"))
+    worker_id: Mapped[int | None] = mapped_column(ForeignKey("workers.id"))
+    material_id: Mapped[int | None] = mapped_column(ForeignKey("materials.id"))
+    resource_kind: Mapped[str] = mapped_column(String(20))
     event_type: Mapped[str] = mapped_column(String(40))
     received_at: Mapped[int] = mapped_column(Integer)
     severity: Mapped[str | None] = mapped_column(String(20))
@@ -54,6 +66,25 @@ class MachineDowntimeWindow(Base):
     machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"))
     downtime_from: Mapped[int] = mapped_column(Integer)
     downtime_until: Mapped[int | None]
+    reason: Mapped[str] = mapped_column(String(40))
+    severity: Mapped[str | None] = mapped_column(String(20))
+    source_event_ids: Mapped[list] = mapped_column(JSONB, default=list)
+
+
+class WorkerAbsenceWindow(Base):
+    __tablename__ = "worker_absence_windows"
+    __table_args__ = (
+        CheckConstraint(
+            "absence_until IS NULL OR absence_until > absence_from",
+            name="absence_interval_valid",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    instance_id: Mapped[int] = mapped_column(ForeignKey("instances.id"), index=True)
+    worker_id: Mapped[int] = mapped_column(ForeignKey("workers.id"))
+    absence_from: Mapped[int] = mapped_column(Integer)
+    absence_until: Mapped[int | None]
     reason: Mapped[str] = mapped_column(String(40))
     severity: Mapped[str | None] = mapped_column(String(20))
     source_event_ids: Mapped[list] = mapped_column(JSONB, default=list)
