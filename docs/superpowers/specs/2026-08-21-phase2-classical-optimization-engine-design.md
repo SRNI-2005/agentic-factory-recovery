@@ -6,6 +6,8 @@
 
 > **Amendment 2026-08-23 (user-approved):** solver alternatives carry per-worker processing durations sourced from `operation_machine_worker_times` (Phase 1 §6.3, authoritative). The payload's alternative schema gains a `workers` duration map (§5); CP-SAT models one optional interval per machine-worker combination whose duration is the assigned worker's (§6.2, §6.5); the safe horizon accounts for worker durations (§6.7); truncated recovery operations rescale worker durations proportionally (§3.1). An absent or empty `workers` map falls back to the machine-level `processing_time` with no worker requirement (pure benchmarks such as MK01). Rationale: the Nouri-derived worker layer encodes per-person speed variation (±15% skill factor); scheduling it makes worker choice affect makespan and tardiness instead of availability only.
 
+> **Amendment 2026-08-24 (user-approved): material capacity enforcement (Option B hybrid).** Materials move from advisory-only gatekeeping into the constraint model. §5: the payload gains a root `materials` array (`{"sku", "capacity"}`, capacity = initial stock + receipts arriving before the horizon) and per-operation `materials` demand lists. §6.11: the engine enforces inventory-non-negativity with a **reservoir** constraint — consumption events at operation starts, refill events at receipt times, floor = stock on hand — so an operation can never start unless the material physically exists, and permanently over-demanded instances are INFEASIBLE by construction instead of silently committed. §7 is restructured into three layers: zero-supply pre-blocking unchanged, temporal physics in-model, aggregate shortfall demoted to an advisory warning with structured totals. §11/§12 gain the corresponding tests and criteria. Why reservoir and not AddCumulative: a fixed-capacity cumulative cannot express time-varying supply — capacity = stock + future arrivals would let an early operation consume bars that have not arrived yet, resurrecting the timing bug this amendment closes. Phase 3 owns the business reaction (protect high-priority jobs, suspend/defer low-priority ones) per its amendment of the same date.
+
 > **Amendment 2026-08-23 (second, user-approved):** five consistency fixes against the Phase 1 data model. (1) §3.3, §11, §12: the committer mirrors schedule state onto `operations.status` inside its transaction. (2) §3.1, §5, §6.9, §12: the payload builder derives default per-job tardiness weights from `jobs.priority` (convention: **1 = most important**, per Phase 1 plan) through the existing `job_tardiness_weights` mechanism — derived last, against the run's effective α/β; Phase 3 strategy candidates may override entries. (3) §6.8, §12: a null deadline contributes zero tardiness (required by pure benchmarks such as MK01, where every deadline is null). (4) §10, §12: CLI recovery injects failures through the Phase 1 ingestion path (`ingest_telemetry_event`) instead of direct SQL, restoring audit parity with MQTT triggers and making `machine restore`'s telemetry-default clock reliable. (5) §3.1: roster availability converts to unavailability as its exact complement within `[0, H]` (H = the §6.7 conservative horizon), closing the silent after-shift availability gap.
 
 ## 1. Purpose
@@ -25,6 +27,7 @@ This phase does not implement agents, LLM calls, or MQTT-triggered recovery. Rec
 - A `solver.committer` module that writes solved schedules to versioned database tables.
 - Full constraint model: precedence, release times, no-overlap, machine eligibility, asymmetric processing times, sequence-dependent setup times, worker assignment and availability, worker-dependent processing durations *(Amendment 2026-08-23)*, worker absence windows *(Amendment 2026-08-23)*, machine downtime, deadline tardiness, and material gatekeeping.
 - Weighted multi-objective optimization (makespan + tardiness) with configurable weights.
+- Temporal material capacity enforcement in the engine (reservoir constraints over per-SKU stock, receipts, and operation demands) *(Amendment 2026-08-24)*.
 - Both baseline and recovery schedule solving.
 - Fixed-vs-fixed conflict clipping: frozen operations take precedence over overlapping downtime and worker-unavailability windows, with interventions recorded as payload warnings.
 - Recovery with support for multiple simultaneously failed machines.
@@ -63,7 +66,7 @@ Queries the database for a given instance and produces a self-contained JSON pay
 - Converts worker availability windows (positive) into unavailability intervals (negative) *(Amendment 2026-08-23, second)*: the builder first computes the conservative horizon `H` exactly as §6.7 specifies, then emits the complement of the unioned availability windows within `[0, H]` — including the leading edge before the first window and the trailing stretch after the last one — so workers are never implicitly available outside their shifts.
 - Reads `worker_absence_windows` directly — already negative semantics, no conversion needed *(Amendment 2026-08-23)*.
 - Reads `machine_downtime_windows` directly (already negative semantics).
-- Performs pre-solve material gatekeeping: computes material availability from `materials.initial_stock` plus `material_receipts` minus `operation_bom` requirements. Operations with provably unavailable materials are excluded from the payload and listed in `blocked_operations` with a reason.
+- Handles materials in three layers *(restructured by Amendment 2026-08-24; details in §7)*: emits `materials` capacities (initial stock + receipts strictly before the horizon) and per-operation `materials` demands from `operation_bom`; hard-blocks operations whose SKU has zero total supply (`MATERIAL_UNAVAILABLE`, cascading); records partial shortfalls as advisory warnings only — enforcement lives in the engine (§6.11). Blocked operations contribute no demands, no capacities, and no events.
 - For recovery payloads: reads the current active schedule.
   - **Completed operations:** Marked as frozen with their historic fixed assignments.
   - **In-progress on healthy machines:** Marked as frozen to prevent disrupting ongoing work.
@@ -207,6 +210,7 @@ The payload is the contract between `payload_builder` and `engine`. The solver s
           "operation_id": "J01-O2",
           "sequence": 2,
           "status": "PENDING",
+          "materials": [{"sku": "STEEL-304", "quantity": 6}],
           "alternatives": [
             { "machine_id": "MC-03", "processing_time": 12, "workers": { "W-01": 11, "W-03": 13 } },
             { "machine_id": "MC-05", "processing_time": 18, "workers": { "W-02": 19 } }
@@ -219,6 +223,14 @@ The payload is the contract between `payload_builder` and `engine`. The solver s
 
   "machine_downtime": [
     { "machine_id": "MC-05", "from": 200, "until": 350, "reason": "MAINTENANCE" }
+  ],
+
+  "materials": [
+    { "sku": "STEEL-304", "capacity": 10 }
+  ],
+
+  "material_receipts": [
+    { "sku": "STEEL-304", "quantity": 4, "available_at": 500 }
   ],
 
   "worker_unavailability": [
@@ -249,6 +261,7 @@ Design principles:
 - Operations interrupted by a machine failure are NOT frozen; they are dynamically truncated to their remaining processing time, set to `PENDING`, and given alternatives excluding the failed machine.
 - Worker unavailability is pre-converted from positive availability windows by the payload builder.
 - Each alternative's `workers` map binds an eligible worker to their specific duration (`operation_machine_worker_times`, authoritative) *(Amendment 2026-08-23)*: the engine schedules the assigned worker's duration, so worker choice affects makespan and tardiness. An absent or empty map means no worker is required and the machine-level `processing_time` applies.
+- `materials` (root) lists every demanded SKU with its `capacity` = initial stock + receipts arriving strictly before the horizon *(Amendment 2026-08-24)*. `material_receipts` (root) lists those arrivals individually as `{sku, quantity, available_at}` — the engine's reservoir needs the timing, not just the total; arrivals at or after the horizon are omitted entirely (they can never help this solve). Per-operation `materials` lists carry `{sku, quantity}` from `operation_bom`; frozen, completed, and blocked operations carry empty/absent lists. The engine treats a demanded SKU missing from the root array as capacity 0 with no receipts (defensive; normally pre-blocked).
 - Blocked operations are excluded from solving and listed with a reason for downstream explainability.
 - Setup times use `from_family: null` for initial setup on a machine.
 - `machine_downtime` entries with `until: null` represent permanent failures. Note: Permanently failed machines are stripped from the `machines` array entirely, and their downtime entries must ALSO be omitted from `machine_downtime` to prevent the solver from throwing a KeyError when looking up the non-existent machine.
@@ -325,22 +338,27 @@ When `normalize_objectives` is enabled, both makespan and total tardiness are di
 
 Frozen operations are added as fixed-interval constants (not decision variables) to the relevant machine and worker no-overlap constraints. They occupy time on their assigned resources but are not subject to optimization.
 
-## 7. Material Gatekeeping
+## 6.11 Material Capacity (Reservoir) *(Amendment 2026-08-24)*
 
-Materials are handled as a pre-solve absolute-supply check, not as solver constraints or priority-based allocation.
+Raw materials are *consumed*, not released when an operation finishes — so inventory is a depleting resource with timed replenishment. The faithful CP-SAT primitive is the reservoir constraint, not a renewable cumulative:
 
-The `payload_builder` cannot pre-allocate materials to specific operations because the allocation order depends on the schedule, which is exactly what the solver is computing. Instead, the check is conservative:
+- **One reservoir per demanded SKU.** Events:
+  - for each PENDING operation whose `materials` list carries the SKU: a consumption event at that operation's start variable with level change `−quantity`, activated by an any-combo boolean that is true iff the operation is scheduled at all (OR of its combo literals, linked with the same implication pattern as circuit node presence);
+  - for each receipt of the SKU arriving strictly before the horizon: a fixed refill event at `available_at` with change `+quantity`.
+- **Floor:** `−capacity`, where capacity comes from the payload's root `materials` row (stock on hand at t=0 plus arrivals; arrivals are already inside the event list, so the floor uses initial stock only). **Ceiling:** unconstrained-large (`Σ quantities + Σ refill quantities`).
+- **Semantics:** inventory-on-hand never drops below zero at any point, hence no operation starts unless its bars physically exist at its start time. The solver may freely delay an operation past a receipt to wait for stock. Instances whose total demand can never be covered come back `INFEASIBLE` — nothing is committed, and Phase 3 reacts (its 2026-08-24 amendment).
+- Blocked/frozen/completed operations contribute no events. Demanded SKUs missing from the root `materials` array get capacity 0 (normally unreachable because of pre-blocking).
+- Determinism: events are emitted in payload iteration order; identical payloads build identical reservoirs.
 
-1. For each material, compute `total_supply = materials.initial_stock + sum(material_receipts.quantity)` across all receipts arriving before the solver horizon.
-2. For each material, compute `total_demand = sum(operation_bom.quantity_required)` across all pending operations in the instance.
-3. If `total_supply >= total_demand`, all operations pass the material check. The solver determines the actual schedule order; material timing is implicitly feasible because enough material exists across the horizon.
-4. If `total_supply < total_demand`, the shortfall is reported. Operations are only blocked if their specific material has zero total supply (no stock and no receipts). Partial shortfalls are reported to Phase 3 agents as warnings, not as hard blocks, because the solver's schedule may naturally resolve the conflict by ordering jobs such that receipts arrive before consumption.
+## 7. Material Handling *(restructured by Amendment 2026-08-24)*
 
-This is intentionally loose. True temporal inventory routing (ensuring material is available at the exact moment an operation is scheduled) would require cumulative resource constraints in CP-SAT, which significantly increases solve complexity at 30-job scale. The conservative total-supply check avoids artificial bottlenecks while catching genuinely impossible material shortages.
+Three layers, in order:
 
-Within a single job, material flow between operations is handled implicitly by precedence constraints. Cross-job material dependencies are not modeled; jobs are independent customer orders.
+1. **Zero-supply pre-block (builder, unchanged):** a SKU with no stock and no receipts blocks every operation whose BOM references it (`MATERIAL_UNAVAILABLE`), cascading `PREDECESSOR_BLOCKED`. Provably impossible work never reaches the solver.
+2. **Temporal physics (engine, §6.11):** every remaining operation's demand feeds a per-SKU reservoir against capacity = initial stock + receipts arriving before the horizon. The solver resolves receipt-timed conflicts by delaying operations; permanently over-demanded instances return `INFEASIBLE`.
+3. **Advisory totals (builder warning):** when total demand still exceeds total supply for a SKU, the payload records `{type: MATERIAL_SHORTFALL, material_sku, total_supply, total_demand}` as before. It is informational — a heads-up for Phase 3 strategists — and no longer the enforcement mechanism.
 
-Blocked operations are excluded from the solver payload with a reason. The reason is available for Phase 3 agents to propose recovery actions (e.g., expedite a material receipt, substitute materials, defer the job).
+Rationale: aggregate totals are timing-blind — two operations drawing the same stock before a shared receipt pass the totals check while driving inventory negative at t=0. Only the solver sees start times, so only the solver can enforce the floor. Phase 3 reacts to INFEASIBLE results and structured shortfall warnings by suspending or deferring lower-priority jobs through its strategy catalog.
 
 ## 8. Schedule Versioning and Rollback
 
@@ -439,6 +457,8 @@ Small, hand-crafted fixture payloads (2-3 jobs, 2-3 machines) where each constra
 | Worker duration honored *(Amendment 2026-08-23)* | Op A only eligible on M1; `workers` map {W1: 10, W4: 20}; W1 unavailable for the whole horizon. | Assigned worker is W4 and end − start = 20. |
 | No-worker fallback *(Amendment 2026-08-23)* | Alternative with empty/absent `workers` map (benchmark-style). | Duration = machine-level `processing_time`; no worker constraint applied. |
 | Null deadline *(Amendment 2026-08-23, second)* | Job with `deadline: null` completing at t=80. | No tardiness variable; objective excludes the job. |
+| Material timing *(Amendment 2026-08-24)* | Stock 8; receipt +2 at t=500; A(5) and B(5) both immediately eligible. | Both scheduled; the later one starts ≥ 500. |
+| Permanent over-demand *(Amendment 2026-08-24)* | Stock 10; no receipts; A(6) and B(6). | `INFEASIBLE`; no live assignments. |
 | Deadline tardiness | Job deadline = 50. Minimum feasible completion = 80. | Tardiness = 30. |
 | Frozen respected | Op A frozen at M1 t=0–15. Op B eligible on M1. | Op B starts at t≥15 on M1. |
 | Release time | Job `release_time=100`, machine idle at 0. | Op starts ≥ 100. |
@@ -503,6 +523,8 @@ Phase 2 is complete when:
 18. Status mirroring *(Amendment 2026-08-23, second)*: baseline commits mark planned entries `SCHEDULED`; recovery commits classify `COMPLETED` / `IN_PROGRESS` against the reference clock; blocked operations become `BLOCKED`; rollback leaves mirrors intact.
 19. Derived tardiness weights *(Amendment 2026-08-23, second)*: payload weights from priority are mean-preserving around `beta`; jobs with null deadlines contribute zero tardiness and MK01 still solves to optimal makespan 40.
 20. Injection audit *(Amendment 2026-08-23, second)*: CLI recovery failures land in `telemetry_events` exactly once each via the shared ingestion path; identical re-invocations create no duplicate events or windows.
+21. Material capacity *(Amendment 2026-08-24)*: committed schedules never drive any SKU's inventory negative; receipt-timed conflicts resolve by delaying the affected operation past the arrival.
+22. Permanent over-demand *(Amendment 2026-08-24)*: returns `INFEASIBLE` with no committed version; `MATERIAL_SHORTFALL` warnings persist as advisory metadata with structured totals for Phase 3.
 
 ## 13. Phase Boundary
 

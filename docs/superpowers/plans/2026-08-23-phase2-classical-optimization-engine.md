@@ -3148,6 +3148,187 @@ git commit -m "test(solver): engine determinism, time-limit, purity, normalizati
 
 ---
 
+## Part 4.5 — Material capacity enforcement (Amendment 2026-08-24, Option B)
+
+> Executes BEFORE resuming Task 13. The engine has no setups yet; this part lands material physics first so Task 13's edits build on final constraint structure. Absorbs both controller riders from the Task 12 review (span setup-term becomes moot here for receipts; None-guard lands in 12B). The live code has drifted from earlier listings via approved fixes — these tasks therefore pin canonical TESTS + exact interfaces and describe implementation by anchor; implementers declare any further deviation with reasoning (house pattern since Task 9).
+
+### Task 12A: Builder emits materials capacities + demands
+
+**Files:**
+- Modify: `coe/solver/payload_builder.py`
+- Test: `tests/solver/test_payload_materials.py`
+
+**Interfaces (payload contract additions — frozen):**
+- Root `"materials": [{"sku", "capacity"}]`, sorted by SKU; `capacity = initial_stock + Σ receipts with available_at < horizon` (strict).
+- Root `"material_receipts": [{"sku", "quantity", "available_at"}]`, same receipt set, sorted by (sku, available_at, quantity); arrivals at/after horizon omitted entirely.
+- Per-operation entry gains `"materials": [{"sku", "quantity"}]` sorted by SKU (from `operation_bom`; empty list when none). Key order within an op dict: `operation_id, sequence, status, materials, alternatives, frozen`.
+- Blocked operations carry `"materials": []` and contribute to neither arrays' demand side nor warnings beyond existing behavior; zero-supply pre-blocking, cascade, and `MATERIAL_SHORTFALL` warning shape are UNCHANGED.
+- Baseline determinism must hold byte-for-byte.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/solver/test_payload_materials.py`:
+
+```python
+"""Amendment 2026-08-24: payload carries material physics inputs."""
+import json
+
+import pytest
+from sqlalchemy import text
+
+pytestmark = pytest.mark.db
+
+
+def _build(session, inst):
+    from coe.solver.payload_builder import build_payload
+
+    return build_payload(session, instance_row=inst, alpha=1.0, beta=1.0,
+                         time_limit_seconds=60)
+
+
+def test_factory_materials_capacities_match_db(demo_session):
+    session, inst = demo_session
+    p = _build(session, inst)
+    skus = [m["sku"] for m in p["materials"]]
+    assert skus == sorted(skus) and len(skus) == 8
+
+    row = session.execute(text(
+        "SELECT m.sku, m.initial_stock, "
+        "  COALESCE(SUM(CASE WHEN r.available_at < :h THEN r.quantity END), 0) "
+        "FROM materials m "
+        "LEFT JOIN material_receipts r ON r.material_id = m.id "
+        "WHERE m.instance_id = :i GROUP BY m.sku, m.initial_stock"),
+        {"i": inst.id, "h": 10 ** 9}).all()
+    # recompute per-sku with the payload's own horizon for exactness:
+    from coe.solver.horizon import compute_horizon
+
+    H = compute_horizon(jobs=p["jobs"],
+                        machine_downtime=p["machine_downtime"],
+                        setup_times=p["setup_times"])
+    expected = {}
+    for sku, stock, _ in row:
+        rec = session.execute(text(
+            "SELECT COALESCE(SUM(r.quantity),0) FROM material_receipts r "
+            "JOIN materials m ON m.id = r.material_id "
+            "WHERE m.instance_id = :i AND m.sku = :s AND r.available_at < :h"),
+            {"i": inst.id, "s": sku, "h": H}).scalar_one()
+        expected[sku] = stock + rec
+    got = {m["sku"]: m["capacity"] for m in p["materials"]}
+    assert got == expected
+
+
+def test_operation_demands_mirror_bom(demo_session):
+    session, inst = demo_session
+    p = _build(session, inst)
+    checked = 0
+    for job in p["jobs"]:
+        for op in job["operations"]:
+            dem = op["materials"]
+            assert [d["sku"] for d in dem] == sorted(d["sku"] for d in dem)
+            if op["status"] != "BLOCKED":
+                rows = session.execute(text(
+                    "SELECT m.sku, b.quantity_required FROM operation_bom b "
+                    "JOIN operations o ON o.id = b.operation_id "
+                    "JOIN jobs j ON j.id = o.job_id "
+                    "JOIN materials m ON m.id = b.material_id "
+                    "WHERE j.name = :j AND o.sequence_number = :s "
+                    "AND j.instance_id = :i ORDER BY m.sku"),
+                    {"j": job["job_id"], "s": op["sequence"],
+                     "i": inst.id}).all()
+                assert dem == [{"sku": s, "quantity": q} for s, q in rows]
+                checked += 1
+    assert checked > 100          # factory_demo_01 has ~168 ops
+
+
+def test_blocked_ops_carry_no_demands(demo_session):
+    """Zero-supply pre-block unchanged; blocked entries have empty lists."""
+    session, inst = demo_session
+    p = _build(session, inst)
+    assert p["blocked_operations"] == []      # demo baseline is unblocked
+    for job in p["jobs"]:
+        for op in job["operations"]:
+            assert isinstance(op["materials"], list)
+
+
+def test_materials_arrays_deterministic(demo_session):
+    session, inst = demo_session
+    a = json.dumps(_build(session, inst), sort_keys=True)
+    b = json.dumps(_build(session, inst), sort_keys=True)
+    assert a == b
+```
+
+- [ ] **Step 2: Fail run → implement → green**
+
+Implementation anchors (live file):
+1. Op-entry dicts gain `"materials": [...]` at construction time from `bom_by_op` (it exists before classification); key order per interface. When an op later flips to BLOCKED (dead-end or gatekeeping pass), reset its list to `[]`.
+2. In the tail, after `horizon` exists and after gatekeeping, build receipt/sku joins already queried (`receipt_rows`) into:
+   - `payload["material_receipts"]` filtered to `available_at < horizon`, sorted;
+   - `payload["materials"]` capacity map from `stock_by_sku` + those receipts, restricted to SKUs that appear in any non-blocked demand OR any receipt (emit all instance SKUs — simplest deterministic rule: all SKUs of the instance, sorted).
+3. Insert both keys into the final payload dict between `"worker_unavailability"` and `"setup_times"`… actually spec example places them after `machine_downtime` — use: `machine_downtime, materials, material_receipts, worker_unavailability`.
+
+Run: target suite green (4) → full `-m "not mqtt"` regression green → commit `feat(solver): payload emits material capacities, receipts, demands`.
+
+### Task 12B: Engine reservoir constraints
+
+**Files:**
+- Modify: `coe/solver/engine.py`
+- Create fixtures: `material_timing.json`, `over_demand.json`
+- Test: append to `tests/solver/test_engine_constraints.py`
+
+**Interfaces:**
+- Engine honors root `materials`, `material_receipts`, and per-op `materials`. One reservoir per demanded SKU: consumption events `(start_var, −qty)` active on an any-combo boolean per op (same implication pattern as circuit presence: each combo literal implies it; its negation completes the AddBoolOr); refill events `(available_at, +qty)` always active. Floor `−capacity` (missing root row ⇒ capacity 0, no receipts ⇒ any demand is INFEASIBLE — defensive). Ceiling `Σ|changes|`.
+- API check first: `uv run python -c "from ortools.sat.python.cp_model import CpModel; print(hasattr(CpModel, 'AddReservoirConstraintWithActive'))"` — expect True on ortools ≥9.10; if False, STOP and report BLOCKED (do not invent a fallback).
+- Rider 1 (Task-12-review debt): `_schedule_span` gains the latest counted receipt time as a reachability term — waiting for Friday's delivery must fit inside variable domains. Signature grows `receipt_times: list[int] | None = None`; span adds `max(receipt_times or [0])` to its sum. Engine passes `[r["available_at"] for r in payload.get("material_receipts", [])]`.
+- Rider 2: `_schedule_span` worker-unavailability summation guards `until=None` (contributes 0).
+
+- [ ] **Step 1: Fixtures**
+
+`material_timing.json`: skeleton (Task 12) with `"machines": ["M0"]`; TWO single-op jobs J-A/J-B (R=0, DL=null, D=5, W={}, sole alt M0), each op `"materials": [{"sku": "STEEL", "quantity": 5}]`; root `"materials": [{"sku": "STEEL", "capacity": 8}]`; `"material_receipts": [{"sku": "STEEL", "quantity": 2, "available_at": 500}]`.
+
+`over_demand.json`: identical but capacity 10, NO receipts key (omit entirely), quantities 6+6.
+
+- [ ] **Step 2: Tests**
+
+Append:
+
+```python
+# --- temporal material capacity (spec §6.11, Amendment 2026-08-24) ---------
+
+def test_material_timing_delays_one_op():
+    sol = solve(_fx("material_timing"))
+    assert sol["status"] in ("OPTIMAL", "FEASIBLE")
+    starts = sorted(a["start"] for a in sol["assignments"])
+    assert starts[0] == 0
+    assert starts[1] >= 500
+
+
+def test_permanent_over_demand_is_infeasible():
+    sol = solve(_fx("over_demand"))
+    assert sol["status"] == "INFEASIBLE"
+    assert [a for a in sol["assignments"] if not a["is_frozen"]] == []
+
+
+def test_unknown_demanded_sku_defaults_to_zero():
+    p = _fx("material_timing")
+    for j in p["jobs"]:
+        for op in j["operations"]:
+            op["materials"] = [{"sku": "GHOST", "quantity": 1}]
+    p.pop("materials", None)
+    p.pop("material_receipts", None)
+    assert solve(p)["status"] == "INFEASIBLE"
+```
+
+- [ ] **Step 3: Implement** (anchor-guided): combo loop already yields per-op combos + shared `s`; add `demands = {sku: qty}` scan building `b_any[op]` booleans + reservoir event lists; emit `model.AddReservoirConstraintWithActive(times, changes, actives, -capacity, ceiling)` per demanded sku after the NoOverlap loops; update `_schedule_span` signature/call sites + None-guard per riders.
+
+- [ ] **Step 4: Green gates**: 3 new tests pass; full constraint file (21) passes; properties (4) pass; full regression `-m "not mqtt"` green; integrity greps (`coe.db`=0, one `def solve(`).
+
+- [ ] **Step 5: Commit** `feat(solver): reservoir-based material capacity enforcement`
+
+<!-- PART-4-5-END -->
+
+
+---
+
 ## Part 5 — Invariants, committer, rollback
 
 ### Task 15: Pure solution invariants (`coe/solver/invariants.py`)
@@ -4480,6 +4661,10 @@ git commit -m "fix(ingest): maintenance without estimated_downtime opens window"
 | 18 status mirroring (2nd amend) | committer mirroring tests + CLI completed-count |
 | 19 priority weights mean-preserving; null deadlines zero | weight unit tests + null_deadline fixtures |
 | 20 injection lands in telemetry once | CLI idempotency test |
+| 21 material capacity: inventory never negative; receipt-timed conflicts delay ops *(Amend 2026-08-24)* | Task 12B `material_timing` + reservoir floor |
+| 22 permanent over-demand INFEASIBLE, nothing committed; advisory shortfall warnings persist *(Amend 2026-08-24)* | Task 12B `over_demand` + Task 12A warning assertions |
+
+**Part 4.5 note (Amendment 2026-08-24):** Tasks 12A/12B implement material physics per amended spec §5/§6.11/§7. The reservoir primitive replaces the user-sketched AddCumulative because supply is time-varying — a fixed-capacity cumulative would let early operations borrow stock that has not arrived yet (the exact Gap-2 bug this amendment closes). Phase 3 owns the sacrifice decision via its own 2026-08-24 amendment.
 
 Amendment-1 coverage: worker-duration combos (`no_worker_fallback`, `worker_unavailable`, truncation rescale), absence windows read directly (`env` fixture + clip tests).
 

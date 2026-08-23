@@ -1,8 +1,10 @@
 # Phase 3: Agentic Middleware
 
-**Status:** Approved — Amended 2026-08-23 (multi-resource disruption records)
+**Status:** Approved — Amended 2026-08-23 (multi-resource disruption records); 2026-08-24 (material-reactive strategies)
 **Date:** 2026-08-22
 **Phase:** Agentic Middleware
+
+> **Amendment 2026-08-24 (user-approved): material-reactive strategies (Option B hybrid).** Phase 2 now enforces material physics inside the solver (its §6.11 reservoir + restructured §7): permanently over-demanded instances return `INFEASIBLE` instead of committing impossible schedules, receipt-timed conflicts resolve by delaying operations, and `MATERIAL_SHORTFALL` warnings persist as advisory signals with structured totals. This phase owns the business reaction — the agent, never the solver, decides which job sacrifices its claim on contested stock. §3.1 adds two bounded conditional back-edges; §4.3 fixes the priority-protect logic; §5 adds `SUSPEND_JOB` to the closed catalog; §6.1 defines its deterministic payload transformation.
 
 > **Amendment 2026-08-23 (user-approved):** disruptions may target machines, workers, or materials. `DisruptionRecord` becomes a pydantic discriminated union on `kind` (§4.1); the investigation stage gains a deterministic `worker_agent` node (§4.2); MQTT listening covers all three topic patterns (§3.4); the fidelity corpus must cover all three narrative families (§8). Rationale: PRD §5 lists worker-absentee and inventory-shortage narratives; machine-only records cannot represent them.
 
@@ -51,6 +53,13 @@ translate → ingest → machine_agent → production_agent → inventory_agent 
 ```
 
 *(Amendment 2026-08-23: `worker_agent` appended to the investigation stage. All investigation nodes run for every record; each is a pure database query that no-ops (empty findings) when the record's `kind` does not concern it — keeping the pipeline fixed and deterministic by construction, with conditional edges still limited to validation retries and failure fallbacks.)*
+
+**Material-reactive back-edges *(Amendment 2026-08-24)*:** two bounded conditional edges share the strategy loop's `STRATEGY_MAX_ROUNDS` budget:
+
+1. **`manager_compile → strategy_loop`** when the compiled payload carries `MATERIAL_SHORTFALL` warnings for still-included jobs — the strategist may defer or suspend preemptively (§4.3). Recompiling rebuilds the payload from scratch, so resolved conflicts stop emitting warnings and the loop exits naturally.
+2. **`solve → strategy_loop`** when the solve returns `INFEASIBLE` and the payload carried shortfall warnings — Phase 2's reservoir (its §6.11) makes material-impossible instances infeasible by construction, so this edge routes the sacrifice decision to the agent instead of aborting the run.
+
+Exhaustion semantics: if the budget is spent, a shortfall-advisory but *solvable* payload proceeds to commit as-is (warnings recorded); a still-material-infeasible payload terminates `SOLVE_INFEASIBLE` with nothing committed. All other conditional edges remain limited to validation retries and failure fallbacks.
 
 Deterministic routing is enforced by construction: node order is static, and every conditional edge resolves to either a retry with a bounded counter or a documented fallback.
 
@@ -166,6 +175,14 @@ Each round:
 
 Cap exhaustion yields an empty candidate list: the run degrades to a baseline-equivalent solve, never to a failure.
 
+**Material-reactive duty *(Amendment 2026-08-24)*:** when the incoming state carries `MATERIAL_SHORTFALL` warnings or a material-driven `INFEASIBLE` result (§3.1 back-edges), the strategist executes a fixed procedure, not free-form reasoning:
+
+1. Identify the contested SKU(s) from the structured warning fields (`material_sku`, `total_supply`, `total_demand`).
+2. Rank the jobs consuming them: `priority` ascending (1 = most important), deadline tightness as tiebreak.
+3. If a receipt covering the shortfall arrives within the horizon and only timing is wrong, propose `DEFER_JOB` on the lowest-ranked job with an offset landing its start after that receipt. Otherwise propose `SUSPEND_JOB` on the lowest-ranked job (§5) — protecting the higher-priority job's claim.
+4. Append an explanation-state note naming the sacrifice explicitly ("J-B deferred/suspended so J-A keeps the steel").
+5. Set `final: true` once no unresolved shortfall or infeasibility remains for the included job set — or when the round budget is spent (§3.1 exhaustion semantics).
+
 ### 4.4 Manager Compile
 
 The Manager node assembles the solver payload by invoking the Phase 2 `payload_builder`, then applying only candidates whose latest round verdict is `VALID` or `VALID_WITH_WARNING` through the strategy applier (Section 6); the Phase 2 tardiness-weight derivation runs after the applier, using the effective objective weights (Phase 2 §3.1). `INVALID` entries remain in state and `recovery_proposals` for audit but are filtered out before the applier runs. Hard constraints come from the database alone; candidates influence only the soft-preference fields listed in Section 5. Every application is recorded in `payload.warnings`.
@@ -182,6 +199,7 @@ A pydantic discriminated union on `type`. Anything outside the catalog is reject
 | --- | --- | --- |
 | `TARDINESS_WEIGHT` | `job_id`, `weight` ∈ [0, 10] | Sets the job's tardiness weight in the objective |
 | `DEFER_JOB` | `job_id`, `release_offset` ≥ 0 | Raises the job's `release_time` by the offset |
+| `SUSPEND_JOB` *(Amendment 2026-08-24)* | `job_id` | Removes every PENDING operation of the job from the payload — each becomes a `blocked_operations` entry with reason `JOB_SUSPENDED`; frozen/completed history untouched; the job contributes zero tardiness this run and stays in the database for a future run |
 | `EXPEDITE_MATERIAL` | `material_sku`, `quantity` > 0, `available_at` ≥ 0 | Adds a synthetic material receipt |
 | `WEIGHT_PRESET` | `alpha` ≥ 0, `beta` ≥ 0, `alpha + beta > 0` | Overrides global objective weights |
 
@@ -192,6 +210,7 @@ Design notes:
 - The catalog is intentionally minimal; extending it is a deliberate schema change, not a prompt change.
 - An `EXPEDITE_MATERIAL` whose `available_at` falls beyond the projected solver horizon cannot take effect (Phase 2 counts only receipts arriving before the horizon); it receives verdict `VALID_WITH_WARNING` rather than failing silently.
 - *(Amendment 2026-08-23)* No new catalog entries are required by multi-resource disruptions: worker absence recovers through the solver's native worker reassignment (alternatives already carry eligible-worker sets), mitigated where useful by `TARDINESS_WEIGHT`/`DEFER_JOB`; material shortage recovers through the existing `EXPEDITE_MATERIAL`.
+- *(Amendment 2026-08-24)* `SUSPEND_JOB` validation: `INVALID` when the job is unknown, has no PENDING operations, or holds frozen/completed operations in the parent schedule (physical history cannot be discarded). A suspended job remains visible in `recovery_proposals`, payload warnings, and the explanation note — its real-world deadline keeps ticking even though it contributes zero tardiness to this run.
 
 ### 5.1 Objective Extension (Phase 2 Engine Change)
 
@@ -207,7 +226,7 @@ Jobs absent from the map use the global `beta`. The objective becomes `alpha * n
 
 ### 6.1 Applier
 
-A pure module: `(payload, validated_candidates) → transformed_payload`. It performs no validation itself; it assumes candidates passed the catalog validator. Each application appends `{type: STRATEGY_APPLIED, candidate, field_changed}` to `payload.warnings`. Synthetic rows created by `EXPEDITE_MATERIAL` are recorded with `source = 'strategy_agent'` in provenance metadata, per Phase 1's synthetic-labeling rule. Candidates apply in emission order; when two candidates target the same job or material, the later overrides the earlier, and every application is recorded. An exact duplicate proposed within the same round receives verdict `INVALID_DUPLICATE`. Ordering contract with Phase 2 *(Amendment 2026-08-23)*: the applier runs strictly before the payload builder's tardiness-weight derivation (Phase 2 §3.1), so derived default weights reflect the post-`WEIGHT_PRESET` effective `alpha`/`beta`, and explicit `TARDINESS_WEIGHT` entries applied here survive as overrides on top of those defaults.
+A pure module: `(payload, validated_candidates) → transformed_payload`. It performs no validation itself; it assumes candidates passed the catalog validator. Each application appends `{type: STRATEGY_APPLIED, candidate, field_changed}` to `payload.warnings`. Synthetic rows created by `EXPEDITE_MATERIAL` are recorded with `source = 'strategy_agent'` in provenance metadata, per Phase 1's synthetic-labeling rule. Candidates apply in emission order; when two candidates target the same job or material, the later overrides the earlier, and every application is recorded. An exact duplicate proposed within the same round receives verdict `INVALID_DUPLICATE`. Ordering contract with Phase 2 *(Amendment 2026-08-23)*: the applier runs strictly before the payload builder's tardiness-weight derivation (Phase 2 §3.1), so derived default weights reflect the post-`WEIGHT_PRESET` effective `alpha`/`beta`, and explicit `TARDINESS_WEIGHT` entries applied here survive as overrides on top of those defaults. `SUSPEND_JOB` transform *(Amendment 2026-08-24)*, deterministic and recorded per application: every PENDING operation of the job gets `status: "BLOCKED"`, empty alternatives, a `blocked_operations` entry `{operation_id, reason: "JOB_SUSPENDED", material_sku: null}`, and the usual `STRATEGY_APPLIED` warning — Phase 2's engine then sees no demand events for the job (its §6.11), and the committer mirrors `operations.status = BLOCKED`.
 
 ### 6.2 Pre-Commit Gate
 
@@ -331,6 +350,7 @@ Phase 3 is complete when:
 12. Concurrent runs on the same instance serialize through the advisory lock; contention beyond `RECOVERY_LOCK_WAIT_SECONDS` aborts loudly.
 13. Re-running an identical narrative does not duplicate telemetry events (content-derived `message_id`).
 14. An MQTT event of *any* resource kind *(Amendment 2026-08-23)* triggers a committed recovery without any translation LLM call, and duplicate deliveries of the same `message_id` produce exactly one run.
+15. Material-reactive path *(Amendment 2026-08-24)*: a shortfall-triggered run defers or suspends the lower-priority job, commits the protected schedule, and records the sacrifice in `schedule_explanations`; a material-driven INFEASIBLE that survives the round budget terminates `SOLVE_INFEASIBLE` with nothing committed; `SUSPEND_JOB` on a job holding frozen work is rejected `INVALID`.
 
 ## 13. Phase Boundary
 
