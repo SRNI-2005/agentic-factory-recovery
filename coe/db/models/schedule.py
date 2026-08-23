@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -46,7 +48,7 @@ class ScheduleVersion(Base):
         ForeignKey("schedule_versions.id"), nullable=True
     )
     rolled_back: Mapped[bool] = mapped_column(Boolean, default=False)
-    committed_at: Mapped[object] = mapped_column(
+    committed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     payload_hash: Mapped[str] = mapped_column(String(64))
