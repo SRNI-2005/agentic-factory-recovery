@@ -1,5 +1,6 @@
-"""Database → solver payload JSON (spec §3.1/§5, incl. both 2026-08-23
-amendments). Owns ALL builder-side DB access; emits deterministic dicts.
+"""Database → solver payload JSON (spec §3.1/§5, incl. the 2026-08-23
+amendments and the 2026-08-24 material/suspension/status amendment).
+Owns ALL builder-side DB access; emits deterministic dicts.
 
 Conventions:
 - identifiers: machines/jobs/workers/materials use DB names; operations are
@@ -128,6 +129,9 @@ def build_payload(
     )
     machine_by_id = {m.id: m.name for m in machines}
     machine_names = [m.name for m in machines]
+    # Status truth (amendment 2026-08-24 rider d): a FAILED-status machine is
+    # stripped outright — conservative even without CLI failed args.
+    failed_status = {m.name for m in machines if m.status == "FAILED"}
 
     families = (
         session.query(JobFamily).filter(JobFamily.instance_id == iid)
@@ -139,6 +143,11 @@ def build_payload(
         session.query(Job).filter(Job.instance_id == iid).order_by(Job.id).all()
     )
     job_name = {j.id: j.name for j in jobs}
+    # Suspension memory (amendment 2026-08-24 rider c): jobs persisted BLOCKED
+    # never enter the payload; they are remembered as JOB_SUSPENDED instead.
+    suspended_ids = {j.id for j in jobs if j.status == "BLOCKED"}
+    suspended_names = sorted(job_name[jid] for jid in suspended_ids)
+    active_jobs = [j for j in jobs if j.id not in suspended_ids]
 
     ops = (
         session.query(Operation)
@@ -146,13 +155,17 @@ def build_payload(
         .order_by(Operation.job_id, Operation.sequence_number).all()
     )
     op_by_id = {o.id: o for o in ops}
-    worker_names_by_dbid = dict(
-        session.query(Worker.id, Worker.name)
+    suspended_op_ids = {o.id for o in ops if o.job_id in suspended_ids}
+    worker_rows_all = (
+        session.query(Worker)
         .filter(Worker.instance_id == iid).order_by(Worker.id).all()
     )
+    worker_names_by_dbid = {w.id: w.name for w in worker_rows_all}
+    offline_workers = {w.id for w in worker_rows_all
+                       if w.status == "UNAVAILABLE"}
 
     recovering = schedule_type == "RECOVERY"
-    failed_set = set(failed_machine_names)
+    failed_set = set(failed_machine_names) | failed_status
     parent_version_id = None
     active_by_opid: dict[int, object] = {}
     if recovering:
@@ -174,10 +187,10 @@ def build_payload(
                   MachineDowntimeWindow.id).all()
     )
     open_windows = {w.machine_id for w in downtime if w.downtime_until is None}
-    stripped = {
+    stripped = ({
         machine_by_id[mid] for mid in open_windows
         if machine_by_id[mid] in failed_set
-    } if recovering else set()
+    } if recovering else set()) | failed_status
     machine_names = [n for n in machine_names if n not in stripped]
 
     # ---- classify operations against the clock ----
@@ -185,6 +198,8 @@ def build_payload(
     entry_by_dbid: dict[int, dict] = {}
     ops_by_job: dict[int, list[dict]] = {}
     for o in ops:
+        if o.job_id in suspended_ids:
+            continue
         jname = job_name[o.job_id]
         entry = {
             "operation_id": op_id(jname, o.sequence_number),
@@ -237,8 +252,8 @@ def build_payload(
             row.processing_time
 
     for o in ops:
-        entry = entry_by_dbid[o.id]
-        if entry["status"] != "PENDING":
+        entry = entry_by_dbid.get(o.id)
+        if entry is None or entry["status"] != "PENDING":
             continue
         remaining = truncation.get(o.id)
         for a in alt_index.get(o.id, []):
@@ -296,6 +311,8 @@ def build_payload(
     )
     bom_by_op: dict[str, list[dict]] = {}
     for row, sku in boms:
+        if row.operation_id in suspended_op_ids:
+            continue
         op_row = op_by_id[row.operation_id]
         oid_ = op_id(job_name[op_row.job_id], op_row.sequence_number)
         bom_by_op.setdefault(oid_, []).append(
@@ -312,9 +329,15 @@ def build_payload(
         .filter(Material.instance_id == iid).order_by(Material.sku).all()
     )
 
+    # Per-op demand lists (amendment 2026-08-24): attached at construction of
+    # the emitted dicts; blocked flips reset them to [] further below.
+    for entries in ops_by_job.values():
+        for e in entries:
+            e["materials"] = list(bom_by_op.get(e["operation_id"], []))
+
     # ---- horizon BEFORE window conversion (tail-coverage amendment) ----
     preview_jobs = [{"release_time": j.release_time,
-                     "operations": ops_by_job[j.id]} for j in jobs]
+                     "operations": ops_by_job[j.id]} for j in active_jobs]
     raw_windows = [
         {"machine_id": machine_by_id[w.machine_id],
          "from": w.downtime_from, "until": w.downtime_until,
@@ -382,6 +405,9 @@ def build_payload(
     for wid in sorted(worker_names_by_dbid):
         wname = worker_names_by_dbid[wid]
         busy = list(absence_by_worker.get(wid, []))
+        if wid in offline_workers:
+            # Status truth rider (d): UNAVAILABLE worker = out all horizon.
+            busy.append((0, horizon))
         busy.extend(complement(0, horizon, avail_by_worker.get(wid, [])))
         for us, ue in merge_intervals(busy):
             outcome = clip_window((us, ue), frozen_by_worker.get(wname, []))
@@ -422,10 +448,34 @@ def build_payload(
             if e["operation_id"] in blocked_map:
                 e["status"] = "BLOCKED"
                 e["alternatives"] = []
+                e["materials"] = []
                 blocked_operations.append(
                     {"operation_id": e["operation_id"],
                      **blocked_map[e["operation_id"]]})
     warnings.extend(mat_warnings)
+
+    # ---- suspension memory entries (rider c): one per op of a BLOCKED job ----
+    suspended_entries = [
+        {"operation_id": op_id(job_name[o.job_id], o.sequence_number),
+         "reason": "JOB_SUSPENDED", "material_sku": None}
+        for o in sorted((o for o in ops if o.job_id in suspended_ids),
+                        key=lambda o: (job_name[o.job_id],
+                                       o.sequence_number))
+    ]
+    blocked_operations = suspended_entries + blocked_operations
+
+    # ---- material physics inputs for the engine reservoir (§6.11) ----
+    in_horizon_receipts = [
+        {"sku": sku, "quantity": r.quantity, "available_at": r.available_at}
+        for r, sku in receipt_rows if r.available_at < horizon
+    ]
+    in_horizon_receipts.sort(
+        key=lambda d: (d["sku"], d["available_at"], d["quantity"]))
+    capacity_by_sku = dict(stock_by_sku)
+    for r in in_horizon_receipts:
+        capacity_by_sku[r["sku"]] += r["quantity"]
+    materials_out = [{"sku": s, "capacity": capacity_by_sku[s]}
+                     for s in sorted(capacity_by_sku)]
 
     # ---- initial family seeding from the active snapshot ----
     machine_initial_families: dict[str, str] = {}
@@ -446,7 +496,7 @@ def build_payload(
                 machine_initial_families[machine_by_id[mid_]] = fam
 
     payload_jobs = []
-    for j in jobs:
+    for j in active_jobs:
         payload_jobs.append({
             "job_id": j.name,
             "family_id": family_name.get(j.job_family_id),
@@ -455,7 +505,7 @@ def build_payload(
             "priority": j.priority,
             "operations": [
                 {k: e[k] for k in ("operation_id", "sequence", "status",
-                                   "alternatives", "frozen")}
+                                   "materials", "alternatives", "frozen")}
                 for e in ops_by_job[j.id]
             ],
         })
@@ -472,9 +522,12 @@ def build_payload(
         "warnings": warnings,
         "jobs": payload_jobs,
         "machine_downtime": downtime_entries,
+        "materials": materials_out,
+        "material_receipts": in_horizon_receipts,
         "worker_unavailability": worker_unavailability,
         "setup_times": setup_entries,
         "blocked_operations": blocked_operations,
+        "suspended_jobs": suspended_names,
     }
     weights = derive_tardiness_weights(payload_jobs, beta)
     if weights is not None:
