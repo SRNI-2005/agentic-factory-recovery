@@ -25,6 +25,28 @@ def _on_message(client, userdata, msg) -> None:
     except (UnicodeDecodeError, json.JSONDecodeError):
         print(f"[subscriber] undecodable payload on {msg.topic}")
         return
+    # Spec §6.5: topic must be factory/{instance}/machine/{machine}/events and
+    # agree with the decoded payload before anything reaches the database.
+    segments = msg.topic.split("/")
+    if (
+        len(segments) != 5
+        or segments[0] != "factory"
+        or segments[2] != "machine"
+        or segments[4] != "events"
+    ):
+        print(f"[subscriber] REJECTED: malformed topic '{msg.topic}'")
+        return
+    topic_instance, topic_machine = segments[1], segments[3]
+    if (
+        topic_instance != payload.get("instance_id")
+        or topic_machine != payload.get("machine_id")
+    ):
+        print(
+            f"[subscriber] REJECTED: topic/payload mismatch on {msg.topic} "
+            f"(payload instance={payload.get('instance_id')!r}, "
+            f"machine={payload.get('machine_id')!r})"
+        )
+        return
     try:
         telemetry_id, created = ingest_telemetry_event(payload)
         status = "created" if created else "duplicate-suppressed"

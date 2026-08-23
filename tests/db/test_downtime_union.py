@@ -92,3 +92,67 @@ def test_negative_occurred_at_rejected_payload_level(demo):
     except PayloadError:
         raised = True
     assert raised
+
+
+@pytest.mark.mqtt
+def test_topic_payload_mismatch_rejected(demo):
+    import json
+    import time
+
+    import paho.mqtt.client as mqtt
+
+    from coe.config import get_settings
+    from coe.mqtt.edge_stub import publish_failure
+    from coe.mqtt.subscriber import run_subscriber
+
+    handle = run_subscriber()
+    try:
+        good_mid = publish_failure("factory_demo_01", "M4")
+
+        bad_mid = "evt-mismatch-01"
+        bad_payload = {
+            "message_id": bad_mid,
+            "instance_id": "factory_demo_01",
+            "machine_id": "M4",
+            "event_type": "FAILURE",
+            "occurred_at": 300,
+            "severity": "HIGH",
+            "estimated_downtime": 40,
+            "reason": "mechanical_failure",
+        }
+        s = get_settings()
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client.connect(s.mqtt_host, s.mqtt_port)
+        client.loop_start()
+        # Topic claims M9, payload says M4 -> subscriber must reject pre-ingest.
+        info = client.publish(
+            "factory/factory_demo_01/machine/M9/events",
+            json.dumps(bad_payload),
+            qos=1,
+        )
+        info.wait_for_publish(timeout=10)
+        client.loop_stop()
+        client.disconnect()
+
+        eng = create_engine(get_settings().database_url)
+        deadline = time.time() + 5
+        good_count = 0
+        while time.time() < deadline and good_count == 0:
+            with eng.begin() as c:
+                good_count = c.execute(
+                    text("SELECT count(*) FROM telemetry_events WHERE message_id = :m"),
+                    {"m": good_mid},
+                ).scalar_one()
+            if good_count == 0:
+                time.sleep(0.2)
+        assert good_count == 1
+
+        time.sleep(2)  # settle delay: a wrongly-ingested event would show by now
+        with eng.begin() as c:
+            n = c.execute(
+                text("SELECT count(*) FROM telemetry_events WHERE message_id = :m"),
+                {"m": bad_mid},
+            ).scalar_one()
+        assert n == 0
+    finally:
+        handle.stop()

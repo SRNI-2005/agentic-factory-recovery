@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: coe
       POSTGRES_DB: coe
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - tsdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +18,7 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
-      - "1883:1883"
+      - "127.0.0.1:1883:1883"
     volumes:
       - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     healthcheck:

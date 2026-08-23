@@ -34,9 +34,9 @@ def add_job_attributes(
 
     ops_by_job: dict[int, list[int]] = defaultdict(list)
     op_rows = session.execute(
-        select(Operation.id, Operation.job_id).where(
-            Operation.instance_id == scenario_id
-        )
+        select(Operation.id, Operation.job_id)
+        .where(Operation.instance_id == scenario_id)
+        .order_by(Operation.id)
     ).all()
     for op_id, job_id in op_rows:
         ops_by_job[job_id].append(op_id)
