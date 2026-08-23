@@ -72,8 +72,20 @@ def _schedule_span(payload: dict, frozen_echo: list,
     downtime = sum(wdw["until"] - wdw["from"]
                    for wdw in (machine_downtime or [])
                    if wdw["until"] is not None)
+    # RIDER (task-13): sequence-dependent setups consume real time between
+    # ops (§6.6), so reserve each machine's largest positive setup once —
+    # the same per-machine accounting as the §6.7 horizon — else tight
+    # schedules clip against the variable upper bound.
+    max_setup_per_machine: dict[str, int] = {}
+    for row in payload["setup_times"]:
+        d = int(row["duration"])
+        if d > 0:
+            mid = row["machine_id"]
+            max_setup_per_machine[mid] = max(
+                max_setup_per_machine.get(mid, 0), d)
     return max(1, release + frozen_end + processing + unavail + downtime
-               + max(receipt_times or [0]))
+               + max(receipt_times or [0])
+               + sum(max_setup_per_machine.values()))
 
 
 def echo_assignment(job, op) -> dict:
@@ -89,6 +101,106 @@ def echo_assignment(job, op) -> dict:
         "setup_time": 0,
         "is_frozen": True,
     }
+
+
+def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
+    """Sequence-dependent setups via AddCircuit with dummy nodes (§6.6).
+
+    Node 0 = Dummy Start, node 1 = Dummy End; each eligible pending op is an
+    optional node tied to its machine-assignment literals. Arc transits are 0;
+    setups are explicit optional intervals [start_j - d, start_j) gated by the
+    incoming arc literal (family pairs are static, so no dynamic AND needed).
+    Returns {operation_id: [(arc_literal, minutes), ...]} for extraction."""
+    lookup: dict[tuple[str, str | None, str], int] = {}
+    for row in payload["setup_times"]:
+        d = int(row["duration"])
+        if d > 0:
+            key = (row["machine_id"], row.get("from_family"),
+                   row["to_family"])
+            lookup[key] = max(lookup.get(key, 0), d)
+
+    init_fam = payload.get("machine_initial_families") or {}
+    mach_ops: dict[str, list[str]] = {}
+    for _, op in pending:
+        for c in combo_by_op.get(op["operation_id"], []):
+            mach_ops.setdefault(c["machine"], []).append(op["operation_id"])
+
+    setup_choices: dict[str, list[tuple[object, int]]] = {}
+
+    # determinism: machines in sorted order, oids in first-appearance order
+    for m in sorted(mach_ops):
+        oids = list(dict.fromkeys(mach_ops[m]))
+        node = {o: i + 2 for i, o in enumerate(oids)}
+        f = {o: fam_of.get(o) for o in oids}
+
+        def d_of(ff, tf, _m=m):
+            return lookup.get((_m, ff, tf), 0)
+
+        has_any = any(d_of(init_fam.get(m), f[o]) > 0 for o in oids) or any(
+            d_of(f[a], f[b]) > 0 for a in oids for b in oids if a != b)
+        if not has_any:
+            continue  # MK01 fast path: no positive row touches this machine
+
+        on = {o: model.NewBoolVar(f"on_{m}_{o}") for o in oids}
+        idle = model.NewBoolVar(f"idle_{m}")
+        arcs: list[tuple[int, int, object]] = []
+        arcs.append((0, 1, idle))            # S->E iff nothing lands here
+        # DEVIATION from brief listing: ortools 9.15 rejects None as an arc
+        # literal ("Invalid boolean literal"); True is the constant-true arc.
+        arcs.append((1, 0, True))            # E->S closes every loop
+
+        for o in oids:
+            combos_m = [c for c in combo_by_op[o] if c["machine"] == m]
+            for c in combos_m:
+                model.AddImplication(c["lit"], on[o])
+            model.AddBoolOr([*[c["lit"] for c in combos_m], on[o].Not()])
+            model.AddImplication(on[o], idle.Not())
+
+            sv = combos_m[0]["start"]
+            # DEVIATION from brief listing: on[o] cannot gate both S->o and
+            # o->E — with >=2 assigned ops every S->x arc would share a true
+            # literal and the circuit over-subscribes Start (INFEASIBLE).
+            # Dedicated literals are the real incoming/outgoing arcs; the
+            # circuit ties them to on[o] via the self-loop.
+            first = model.NewBoolVar(f"fst_{m}_{o}")
+            last = model.NewBoolVar(f"lst_{m}_{o}")
+            arcs.append((node[o], node[o], on[o].Not()))
+            arcs.append((0, node[o], first))
+            d_init = d_of(init_fam.get(m), f[o])
+            if d_init > 0:
+                # Anchor: the initial setup cannot precede time zero (nothing
+                # else on the machine forces this; non-first positions are
+                # covered by predecessor overlap).
+                model.Add(sv >= d_init).OnlyEnforceIf(first)
+                iv = model.NewOptionalIntervalVar(
+                    sv - d_init, d_init, sv, first, f"su_{m}_init_{o}")
+                machine_iv.setdefault(m, []).append(iv)
+                setup_choices.setdefault(o, []).append((first, d_init))
+            arcs.append((node[o], 1, last))
+
+        for a in oids:
+            for b in oids:
+                if a == b:
+                    continue
+                arc = model.NewBoolVar(f"arc_{m}_{a}_{b}")
+                arcs.append((node[a], node[b], arc))
+                # DEVIATION from brief listing: circuit succession must
+                # constrain time, else the solver runs ops opposite to their
+                # arc order and parks the setup interval before t=0.
+                model.Add(
+                    combo_by_op[b][0]["start"]
+                    >= combo_by_op[a][0]["end"]).OnlyEnforceIf(arc)
+                d = d_of(f[a], f[b])
+                if d > 0:
+                    sb = combo_by_op[b][0]["start"]
+                    iv = model.NewOptionalIntervalVar(
+                        sb - d, d, sb, arc, f"su_{m}_{a}_{b}")
+                    machine_iv.setdefault(m, []).append(iv)
+                    setup_choices.setdefault(b, []).append((arc, d))
+
+        model.AddCircuit(arcs)
+
+    return setup_choices
 
 
 def solve(payload: dict) -> dict:
@@ -234,6 +346,11 @@ def solve(payload: dict) -> dict:
                                   until, f"uw_{uw['worker_id']}_{i}")
         worker_iv.setdefault(uw["worker_id"], []).append(iv)
 
+    fam_of = {ob["operation_id"]: jb.get("family_id") for jb, ob in pending}
+    setup_choices = _add_setups(model, payload=payload, pending=pending,
+                                combo_by_op=combo_by_op,
+                                machine_iv=machine_iv, fam_of=fam_of)
+
     for ivs in machine_iv.values():
         if len(ivs) > 1:
             model.AddNoOverlap(ivs)
@@ -304,6 +421,9 @@ def solve(payload: dict) -> dict:
                       if solver.BooleanValue(c["lit"]))
         st = int(solver.Value(chosen["start"]))
         en = int(solver.Value(chosen["end"]))
+        setup_used = sum(
+            d for lit, d in setup_choices.get(oid_, [])
+            if solver.BooleanValue(lit))
         assignments.append({
             "operation_id": oid_,
             "job_id": j["job_id"],
@@ -312,7 +432,7 @@ def solve(payload: dict) -> dict:
             "start": st,
             "end": en,
             "processing_time": en - st,
-            "setup_time": 0,
+            "setup_time": setup_used,
             "is_frozen": False,
         })
         ends_solved[j["job_id"]] = max(ends_solved.get(j["job_id"], 0), en)

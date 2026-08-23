@@ -142,3 +142,42 @@ def test_unknown_demanded_sku_defaults_to_zero():
     p.pop("materials", None)
     p.pop("material_receipts", None)
     assert solve(p)["status"] == "INFEASIBLE"
+
+
+# --- sequence-dependent setups (spec §6.6) ---------------------------------
+
+def _live_triples(sol):
+    return sorted(
+        (a["start"], a["end"], a["setup_time"])
+        for a in sol["assignments"] if not a["is_frozen"])
+
+
+def test_setup_enforced_cheapest_order_wins():
+    """Two single-op jobs (families A/B) sharing M0; A→B=20, B→A=2.
+    Solver must run B first: makespan 12 beats 30."""
+    sol = solve(_fx("setup_enforced"))
+    assert sol["makespan"] == 12
+    triples = _live_triples(sol)
+    assert triples[0] == (0, 5, 0)          # B first, no initial row
+    assert triples[1][0] == 7               # setup [5,7) then A
+    assert triples[1][2] == 2
+
+
+def test_setup_skipped_same_family():
+    sol = solve(_fx("setup_skipped"))
+    assert _live_triples(sol) == [(0, 5, 0), (5, 10, 0)]
+
+
+def test_initial_setup_precedes_first_op():
+    sol, a = _one(_fx("initial_setup"))
+    assert (a["start"], a["setup_time"]) == (10, 10)
+
+
+def test_initial_setup_from_history():
+    sol, a = _one(_fx("initial_from_history"))
+    assert (a["start"], a["setup_time"]) == (7, 7)
+
+
+def test_missing_setup_row_means_zero():
+    sol = solve(_fx("missing_setup_row"))
+    assert _live_triples(sol) == [(0, 5, 0), (5, 10, 0)]
