@@ -3150,7 +3150,7 @@ git commit -m "test(solver): engine determinism, time-limit, purity, normalizati
 
 ## Part 4.5 — Material capacity enforcement (Amendment 2026-08-24, Option B)
 
-> Executes BEFORE resuming Task 13. The engine has no setups yet; this part lands material physics first so Task 13's edits build on final constraint structure. Absorbs both controller riders from the Task 12 review (span setup-term becomes moot here for receipts; None-guard lands in 12B). The live code has drifted from earlier listings via approved fixes — these tasks therefore pin canonical TESTS + exact interfaces and describe implementation by anchor; implementers declare any further deviation with reasoning (house pattern since Task 9).
+> Executes BEFORE resuming Task 13. The engine has no setups yet; this part lands material physics first so Task 13's edits build on final constraint structure. Absorbs both controller riders from the Task 12 review (span setup-term becomes moot here for receipts; None-guard lands in 12B). **Second-review riders (2026-08-24 gap sweep, user-approved):** Task 12A additionally implements (i) *suspension memory* — builder skips jobs whose `jobs.status == 'BLOCKED'`, lists them as `JOB_SUSPENDED` blocked entries, emits root `suspended_jobs`; committer side mirrors job statuses (Task 16 rider); (ii) *status truth* — machines with DB status `FAILED` are stripped even without CLI args; workers with status `UNAVAILABLE` get full-horizon unavailability. Task 12B additionally makes `_schedule_span` include Σ temporary machine-downtime durations so ops may wait out maintenance — the old `test_infeasible_reports_without_live_assignments` fixture flips to delayed-start OPTIMAL (`start >= 100000`). Task 15 (Part 5) rider: invariant membership check exempts `is_frozen` echoes, with a frozen-on-stripped-machine regression test. The live code has drifted from earlier listings via approved fixes — these tasks therefore pin canonical TESTS + exact interfaces and describe implementation by anchor; implementers declare any further deviation with reasoning (house pattern since Task 9).
 
 ### Task 12A: Builder emits materials capacities + demands
 
@@ -3340,7 +3340,7 @@ def test_unknown_demanded_sku_defaults_to_zero():
 **Interfaces:**
 - Produces: `check_solution(payload: dict, solution: dict) -> list[str]` — empty list means the solution satisfies every §6.2 invariant:
   1. frozen ops byte-identical to their payload `frozen` blocks (machine, worker, start, end);
-  2. no assignment on a machine absent from `payload["machines"]` (stripped = permanently failed; temporary failures stay listed and remain legal);
+  2. no **live** assignment on a machine absent from `payload["machines"]` (stripped = permanently failed; temporary failures stay listed and remain legal). *Rider (2026-08-24 gap sweep):* `is_frozen` echoes are EXEMPT from this check — historic work on a since-stripped machine is immutable fact, not a violation; regression test required;
   3. machine eligibility + worker eligibility + exact combo duration;
   4. job precedence order across *scheduled* ops (blocked/missing ops skip the chain);
   5. blocked operations never appear.
@@ -4669,6 +4669,8 @@ git commit -m "fix(ingest): maintenance without estimated_downtime opens window"
 Amendment-1 coverage: worker-duration combos (`no_worker_fallback`, `worker_unavailable`, truncation rescale), absence windows read directly (`env` fixture + clip tests).
 
 Documented deviations from spec letter (all benign, reviewer-visible): `objective_value` stored as Float ratio (spec listed no type); single-column FKs on schedule tables matching newer model style; UNKNOWN/MODEL_INVALID reported as INFEASIBLE; frozen echo `setup_time=0`; `schedule show` imports the private snapshot helper (Phase 3 will promote it). The Phase 1 ingest crash fix ships as Task 20 per the user-approved drive-by decision.
+
+2026-08-24 gap-sweep riders (user-approved, folded into Tasks 12A/12B/15/16): frozen-on-stripped-machine invariant exemption; span includes Σ machine downtime (old infeasible-downtime fixture flips to delayed-start OPTIMAL — honest physics); suspension memory via `jobs.status=BLOCKED` + root `suspended_jobs` + committer job-mirror; status truth (FAILED machines stripped without CLI args; UNAVAILABLE workers get full-horizon unavailability). Spec §6.7 errata remains OPEN with the user: H omits stacking/worker-unavailability terms — harmless in Phase 2 (`_schedule_span` governs domains; H only normalizes) but Phase 4's QAOA reuses H as its horizon seed and must not treat it as a hard bound.
 
 ## Appendix B — Running everything
 
