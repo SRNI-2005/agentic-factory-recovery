@@ -78,6 +78,21 @@ def test_blocked_ops_carry_no_demands(demo_session):
             assert isinstance(op["materials"], list)
 
 
+def test_frozen_ops_carry_no_demands(demo_session, seeded_recovery_env):
+    session, inst = demo_session
+    from coe.solver.payload_builder import build_payload
+
+    p = build_payload(session, instance_row=inst, alpha=1.0, beta=1.0,
+                      time_limit_seconds=60, schedule_type="RECOVERY",
+                      now=1000)
+    for job in p["jobs"]:
+        for op in job["operations"]:
+            if op["status"] in ("COMPLETED", "IN_PROGRESS"):
+                assert op["materials"] == [], op["operation_id"]
+            elif op["status"] == "PENDING":
+                assert isinstance(op["materials"], list)
+
+
 def test_materials_arrays_deterministic(demo_session):
     session, inst = demo_session
     a = json.dumps(_build(session, inst), sort_keys=True)

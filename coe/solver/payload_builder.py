@@ -329,11 +329,13 @@ def build_payload(
         .filter(Material.instance_id == iid).order_by(Material.sku).all()
     )
 
-    # Per-op demand lists (amendment 2026-08-24): attached at construction of
-    # the emitted dicts; blocked flips reset them to [] further below.
+    # Per-op demand lists (amendment 2026-08-24, §5): only PENDING entries
+    # carry demands — frozen/completed ops must not re-consume historic usage;
+    # blocked flips reset them to [] further below.
     for entries in ops_by_job.values():
         for e in entries:
-            e["materials"] = list(bom_by_op.get(e["operation_id"], []))
+            e["materials"] = (list(bom_by_op.get(e["operation_id"], []))
+                              if e["status"] == "PENDING" else [])
 
     # ---- horizon BEFORE window conversion (tail-coverage amendment) ----
     preview_jobs = [{"release_time": j.release_time,
