@@ -10,6 +10,7 @@ dependencies = [
     "paho-mqtt",
     "pydantic-settings",
     "openpyxl",
+    "ortools>=9.10",
 ]
 
 [dependency-groups]
@@ -27,4 +28,5 @@ testpaths = ["tests"]
 markers = [
     "db: tests requiring Dockerized TimescaleDB (docker compose up -d first)",
     "mqtt: tests also requiring Mosquitto reachable at MQTT_HOST/MQTT_PORT",
+    "benchmark: Tier 1 MK01 optimality validation (spec §11)",
 ]
