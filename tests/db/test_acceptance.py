@@ -183,3 +183,76 @@ def test_criterion_11_mqtt_event_once_with_window(full_pipeline):
         assert stored
     finally:
         handle.stop()
+
+
+def test_criterion_11_multi_resource(full_pipeline):
+    """Amended criterion 11: each kind stores once; worker flips status;
+    material stays telemetry-only."""
+    import time
+
+    from coe.config import get_settings
+    from coe.mqtt.edge_stub import publish_resource_event
+    from coe.mqtt.subscriber import run_subscriber
+    from sqlalchemy import create_engine, text as sqltext
+
+    handle = run_subscriber()
+    try:
+        mids = {
+            "machine": publish_resource_event(
+                instance_name="factory_demo_01", resource_kind="MACHINE",
+                resource_id="M4", event_type="FAILURE", occurred_at=950,
+                severity="HIGH", message_id="acc-mr-machine"),
+            "worker": publish_resource_event(
+                instance_name="factory_demo_01", resource_kind="WORKER",
+                resource_id="W8", event_type="WORKER_ABSENT", occurred_at=951,
+                severity="MEDIUM", message_id="acc-mr-worker"),
+            "material": publish_resource_event(
+                instance_name="factory_demo_01", resource_kind="MATERIAL",
+                resource_id="MAT-003", event_type="MATERIAL_SHORTAGE",
+                occurred_at=952, message_id="acc-mr-material"),
+        }
+        eng = create_engine(get_settings().database_url)
+        deadline = time.time() + 6
+        ok = False
+        while time.time() < deadline and not ok:
+            with eng.begin() as c:
+                # NB: text() does not auto-expand tuples for IN clauses;
+                # query per message_id instead.
+                counts = {
+                    kind: c.execute(sqltext(
+                        "SELECT count(*) FROM telemetry_events te "
+                        "JOIN instances i ON i.id = te.instance_id "
+                        "WHERE i.name='factory_demo_01' AND te.message_id = :m"
+                    ), {"m": mid}).scalar_one()
+                    for kind, mid in mids.items()
+                }
+                wstatus = c.execute(sqltext(
+                    "SELECT status FROM workers w JOIN instances i ON i.id=w.instance_id "
+                    "WHERE i.name='factory_demo_01' AND w.name='W8'"
+                )).scalar_one()
+                absence = c.execute(sqltext(
+                    "SELECT count(*) FROM worker_absence_windows w "
+                    "JOIN instances i ON i.id=w.instance_id "
+                    "WHERE i.name='factory_demo_01'"
+                )).scalar_one()
+            ok = (counts.get("machine") == 1 and counts.get("worker") == 1
+                  and counts.get("material") == 1
+                  and wstatus == "UNAVAILABLE" and absence >= 1)
+            if not ok:
+                time.sleep(0.25)
+
+        # duplicate suppression per kind
+        time.sleep(1.0)
+        publish_resource_event(
+            instance_name="factory_demo_01", resource_kind="MACHINE",
+            resource_id="M4", event_type="FAILURE", occurred_at=950,
+            severity="HIGH", message_id=mids["machine"])
+        with eng.begin() as c:
+            dup = c.execute(sqltext(
+                "SELECT count(*) FROM telemetry_events te "
+                "JOIN instances i ON i.id = te.instance_id "
+                "WHERE i.name='factory_demo_01' AND te.message_id = :m"
+            ), {"m": mids["machine"]}).scalar_one()
+        assert ok and dup == 1
+    finally:
+        handle.stop()
