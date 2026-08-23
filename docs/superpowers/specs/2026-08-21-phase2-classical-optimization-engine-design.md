@@ -19,7 +19,7 @@ This phase does not implement agents, LLM calls, or MQTT-triggered recovery. Rec
 - A `payload_builder` module that reads Phase 1 schema and produces solver-ready JSON.
 - A `solver.engine` module implementing Google OR-Tools CP-SAT with the full constraint model.
 - A `solver.committer` module that writes solved schedules to versioned database tables.
-- Full constraint model: precedence, release times, no-overlap, machine eligibility, asymmetric processing times, sequence-dependent setup times, worker assignment and availability, machine downtime, deadline tardiness, and material gatekeeping.
+- Full constraint model: precedence, release times, no-overlap, machine eligibility, asymmetric processing times, sequence-dependent setup times, worker assignment and availability, worker absence windows *(Amendment 2026-08-23)*, machine downtime, deadline tardiness, and material gatekeeping.
 - Weighted multi-objective optimization (makespan + tardiness) with configurable weights.
 - Both baseline and recovery schedule solving.
 - Fixed-vs-fixed conflict clipping: frozen operations take precedence over overlapping downtime and worker-unavailability windows, with interventions recorded as payload warnings.
@@ -56,6 +56,7 @@ Queries the database for a given instance and produces a self-contained JSON pay
 - Reads jobs, operations, machines, and `operation_machine_alternatives` with processing times.
 - Reads `job_families` and `setup_times` per machine.
 - Converts worker availability windows (positive) into unavailability intervals (negative).
+- Reads `worker_absence_windows` directly — already negative semantics, no conversion needed *(Amendment 2026-08-23)*.
 - Reads `machine_downtime_windows` directly (already negative semantics).
 - Performs pre-solve material gatekeeping: computes material availability from `materials.initial_stock` plus `material_receipts` minus `operation_bom` requirements. Operations with provably unavailable materials are excluded from the payload and listed in `blocked_operations` with a reason.
 - For recovery payloads: reads the current active schedule.

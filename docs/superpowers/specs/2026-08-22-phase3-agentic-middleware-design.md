@@ -1,8 +1,10 @@
 # Phase 3: Agentic Middleware
 
-**Status:** Approved
+**Status:** Approved — Amended 2026-08-23 (multi-resource disruption records)
 **Date:** 2026-08-22
 **Phase:** Agentic Middleware
+
+> **Amendment 2026-08-23 (user-approved):** disruptions may target machines, workers, or materials. `DisruptionRecord` becomes a pydantic discriminated union on `kind` (§4.1); the investigation stage gains a deterministic `worker_agent` node (§4.2); MQTT listening covers all three topic patterns (§3.4); the fidelity corpus must cover all three narrative families (§8). Rationale: PRD §5 lists worker-absentee and inventory-shortage narratives; machine-only records cannot represent them.
 
 ## 1. Purpose
 
@@ -43,10 +45,12 @@ Recovery runs are triggered by the CLI or by an MQTT listener that converts vali
 The workflow is a fixed linear pipeline with one bounded sub-loop. Conditional edges exist only for validation retries and failure fallbacks:
 
 ```text
-translate → ingest → machine_agent → production_agent → inventory_agent
+translate → ingest → machine_agent → production_agent → inventory_agent → worker_agent
     → strategy_loop (≤ STRATEGY_MAX_ROUNDS rounds) → manager_compile
     → solve → gate → commit → verify → explain
 ```
+
+*(Amendment 2026-08-23: `worker_agent` appended to the investigation stage. All investigation nodes run for every record; each is a pure database query that no-ops (empty findings) when the record's `kind` does not concern it — keeping the pipeline fixed and deterministic by construction, with conditional edges still limited to validation retries and failure fallbacks.)*
 
 Deterministic routing is enforced by construction: node order is static, and every conditional edge resolves to either a retry with a bounded counter or a documented fallback.
 
@@ -80,7 +84,7 @@ Fallback policy:
 Two entry points feed the same graph:
 
 - **CLI:** `recover --narrative ...` — narrative text enters the `translate` node.
-- **MQTT listener:** `mqtt listen` is a long-running command subscribing to `factory/{instance_id}/machine/{machine_id}/events`. Validated `FAILURE` payloads are already structured: the listener derives the `DisruptionRecord` directly from payload fields and starts the graph at `ingest`, skipping the `translate` node and its LLM call entirely. Non-FAILURE events never trigger runs.
+- **MQTT listener:** `mqtt listen` is a long-running command subscribing to all three topic patterns — `factory/{instance_id}/machine/{machine_id}/events`, `.../worker/{worker_id}/events`, `.../material/{material_sku}/events` *(Amendment 2026-08-23)*. Validated structured payloads are already typed by their topic's resource kind: the listener derives the matching `DisruptionRecord` variant directly from payload fields and starts the graph at `ingest`, skipping the `translate` node and its LLM call entirely. Non-disruption events never trigger runs.
 
 Listener guarantees:
 
@@ -94,36 +98,59 @@ MAINTENANCE records (CLI narratives describing planned outages) follow the ident
 
 ### 4.1 Translation Agent (AI Role 1)
 
-Input: raw narrative text. Output: a `DisruptionRecord`:
+Input: raw narrative text. Output: a `DisruptionRecord` — as of Amendment 2026-08-23, a pydantic **discriminated union on `kind`** with three variants:
 
 ```json
-{
+{ "kind": "MACHINE",
   "instance_id": "factory_demo_01",
   "machine_id": "MC-04",
   "event_type": "FAILURE",
   "occurred_at": 512,
   "severity": "HIGH",
   "estimated_downtime": 90,
-  "narrative_excerpt": "MC-04 gearbox seized, sparks everywhere"
-}
+  "narrative_excerpt": "MC-04 gearbox seized, sparks everywhere" }
 ```
 
-Scope: one disruption per run. A record names exactly one machine; narratives describing multiple simultaneous failures are rejected with a clear error (repeat the command per machine). Multi-record translation is a documented future extension, not a Phase 3 deliverable.
+```json
+{ "kind": "WORKER",
+  "instance_id": "factory_demo_01",
+  "worker_id": "W-03",
+  "event_type": "WORKER_ABSENT",
+  "occurred_at": 480,
+  "severity": "MEDIUM",
+  "estimated_absence": 240,
+  "narrative_excerpt": "W-03 called in sick this morning" }
+```
+
+```json
+{ "kind": "MATERIAL",
+  "instance_id": "factory_demo_01",
+  "material_sku": "STEEL-304",
+  "event_type": "MATERIAL_SHORTAGE",
+  "occurred_at": 300,
+  "severity": "LOW",
+  "narrative_excerpt": "STEEL-304 bin is empty, delivery stuck at supplier" }
+```
+
+Common fields across all kinds: `kind`, `instance_id`, `event_type`, `occurred_at`, `severity`, `narrative_excerpt`; plus exactly one resource reference (`machine_id` / `worker_id` / `material_sku`). Machine-kind carries optional `estimated_downtime`; worker-kind carries optional `estimated_absence`; material-kind carries neither (shortages are conditions evaluated at solve time).
+
+Scope: one disruption per run. A record names exactly one resource of one kind; narratives describing multiple simultaneous disruptions are rejected with a clear error (repeat the command per resource). Multi-record translation remains a documented future extension, not a Phase 3 deliverable.
 
 Validation layers:
 
-1. Pydantic schema: enums for `event_type` (`FAILURE`, `MAINTENANCE`) and `severity` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`); `occurred_at >= 0`.
+1. Pydantic discriminated union: per-kind enums for `event_type` (per Phase 1 §6.5 table), severities, `occurred_at >= 0`, and presence/absence of the correct duration field per kind.
 2. Instance cross-check: `record.instance_id` must equal the CLI `--instance` value; the CLI value is authoritative, and any mismatch rejects the record.
-3. Database checks: machine exists within the instance. Schema and database failures both feed the validator error back into the prompt and retry, up to `LLM_MAX_RETRIES`, before the run aborts as `TRANSLATION_FAILED`.
+3. Database checks: the referenced resource exists within the instance — machine by id, worker by id, material by SKU, depending on kind. Schema and database failures both feed the validator error back into the prompt and retry, up to `LLM_MAX_RETRIES`, before the run aborts as `TRANSLATION_FAILED`.
 4. Time resolution: relative expressions ("two hours ago") resolve against an explicit reference clock — the `--at` flag if given, otherwise the instance's latest telemetry `occurred_at`. The resolved absolute minute is stored in `occurred_at`.
 
-On success the record is written through the same ingestion function used by the Phase 1 MQTT subscriber (`telemetry_events` row, then `machine_downtime_windows` union logic), guaranteeing identical DB semantics for CLI-triggered and MQTT-triggered runs. Idempotency keys differ by source: MQTT events carry their wire `message_id`; CLI records derive one from a stable hash of the validated record fields (`cli-{hash}`), so re-running an identical narrative is an idempotent no-op rather than a duplicate event. Field mapping differs by source: CLI fills `narrative_excerpt` from the input text; MQTT-derived records copy `payload.reason` into it. `estimated_downtime` maps straight through, producing a finite downtime window when present and an open-ended outage when absent (Phase 1 §6.5).
+On success the record is written through the same ingestion functions used by the Phase 1 MQTT subscriber, guaranteeing identical DB semantics for CLI-triggered and MQTT-triggered runs *(Amendment 2026-08-23: machine records write telemetry + downtime-window union + FAILED status; worker records write telemetry + absence-window union + UNAVAILABLE status; material records write telemetry only)*. Idempotency keys differ by source: MQTT events carry their wire `message_id`; CLI records derive one from a stable hash of the validated record fields (`cli-{hash}`), so re-running an identical narrative is an idempotent no-op rather than a duplicate event. Field mapping differs by source: CLI fills `narrative_excerpt` from the input text; MQTT-derived records copy `payload.reason` into it. Duration fields map straight through, producing finite windows when present and open-ended ones when absent (Phase 1 §6.5).
 
 ### 4.2 Investigation Nodes (no LLM)
 
-- **Machine Agent:** confirms the failed machine, reads its capability set from `machine_capabilities`, and records which capabilities are lost.
-- **Production Agent:** queries the active schedule for operations assigned to the failed machine that are `SCHEDULED` or `IN_PROGRESS` (stranded work), plus their jobs and deadlines.
-- **Inventory Agent:** for each alternative routing candidate, verifies worker eligibility rows and material supply, producing the availability facts consumed by the strategy loop.
+- **Machine Agent:** confirms the failed machine, reads its capability set from `machine_capabilities`, and records which capabilities are lost. No-ops unless `kind = MACHINE`.
+- **Production Agent:** queries the active schedule for operations assigned to the failed machine that are `SCHEDULED` or `IN_PROGRESS` (stranded work), plus their jobs and deadlines. For worker-kind records (Amendment 2026-08-23): queries future scheduled assignments of the absent worker within the absence window.
+- **Inventory Agent:** for each alternative routing candidate, verifies worker eligibility rows and material supply, producing the availability facts consumed by the strategy loop. For material-kind records (Amendment 2026-08-23): additionally records the shortage evidence — total supply vs pending demand for the affected SKU and the operations whose BOM references it.
+- **Worker Agent** *(Amendment 2026-08-23)*: confirms the absent worker, reads their eligibility footprint (`operation_machine_worker_times` rows referencing them), flags operation-machine pairs where the absent worker was the *sole* eligible worker (hard infeasibility candidates vs reassignment options), and records their stranded assignments from the active schedule. No-ops unless `kind = WORKER`.
 
 Each node appends its findings to `db_facts`. Findings are reproducible queries; they are never generated by an LLM.
 
@@ -162,6 +189,7 @@ Design notes:
 - "Accept tardiness on a low-priority job" maps to `TARDINESS_WEIGHT` with a small weight.
 - The catalog is intentionally minimal; extending it is a deliberate schema change, not a prompt change.
 - An `EXPEDITE_MATERIAL` whose `available_at` falls beyond the projected solver horizon cannot take effect (Phase 2 counts only receipts arriving before the horizon); it receives verdict `VALID_WITH_WARNING` rather than failing silently.
+- *(Amendment 2026-08-23)* No new catalog entries are required by multi-resource disruptions: worker absence recovers through the solver's native worker reassignment (alternatives already carry eligible-worker sets), mitigated where useful by `TARDINESS_WEIGHT`/`DEFER_JOB`; material shortage recovers through the existing `EXPEDITE_MATERIAL`.
 
 ### 5.1 Objective Extension (Phase 2 Engine Change)
 
@@ -214,7 +242,7 @@ After commit, the verifier re-reads the new version through `active_schedule` an
 
 ## 8. Fidelity Benchmark
 
-Corpus: seeded JSONL files under `data/corpus/` pairing messy narratives with ground-truth `DisruptionRecord`s and scenario context. Generation is deterministic given a seed; synthetic narratives are labeled as synthetic in provenance metadata.
+Corpus: seeded JSONL files under `data/corpus/` pairing messy narratives with ground-truth `DisruptionRecord`s and scenario context. Generation is deterministic given a seed; synthetic narratives are labeled as synthetic in provenance metadata. *(Amendment 2026-08-23: the corpus must include all three narrative families — machine failure, worker absence, material shortage — in proportions recorded in the report, so translation accuracy is measured per kind and aggregate.)*
 
 Metrics:
 
@@ -288,7 +316,7 @@ uv run python -m coe.cli mqtt listen
 Phase 3 is complete when:
 
 1. `coe.cli recover` executes the full graph on `factory_demo_01` and commits a recovery version linked to its parent.
-2. Translation achieves the `BENCHMARK_TRANSLATION_ACCURACY` threshold on the full corpus, with failures producing `TRANSLATION_FAILED` and zero DB mutations.
+2. Translation achieves the `BENCHMARK_TRANSLATION_ACCURACY` threshold on the full corpus — reported per `kind` (MACHINE / WORKER / MATERIAL) and aggregate *(Amendment 2026-08-23)* — with failures producing `TRANSLATION_FAILED` and zero DB mutations.
 3. All four catalog types apply their documented payload transformations and reject invalid parameters with machine-readable reasons.
 4. The negotiation loop caps at `STRATEGY_MAX_ROUNDS` and degrades to a no-strategy solve with a warning rather than failing.
 5. Per-job tardiness weights flow through to the solver objective; Phase 2 test suite passes unchanged with an empty weight map.
@@ -300,7 +328,7 @@ Phase 3 is complete when:
 11. No LLM call exists outside `translate`, `strategy_loop`, and `explain`; investigation nodes are pure database functions.
 12. Concurrent runs on the same instance serialize through the advisory lock; contention beyond `RECOVERY_LOCK_WAIT_SECONDS` aborts loudly.
 13. Re-running an identical narrative does not duplicate telemetry events (content-derived `message_id`).
-14. An MQTT FAILURE event triggers a committed recovery without any translation LLM call, and duplicate deliveries of the same `message_id` produce exactly one run.
+14. An MQTT event of *any* resource kind *(Amendment 2026-08-23)* triggers a committed recovery without any translation LLM call, and duplicate deliveries of the same `message_id` produce exactly one run.
 
 ## 13. Phase Boundary
 

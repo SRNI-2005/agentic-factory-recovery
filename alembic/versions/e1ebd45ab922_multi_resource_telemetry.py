@@ -59,6 +59,8 @@ def downgrade() -> None:
     op.drop_constraint(op.f('ck_telemetry_events_exactly_one_resource'), 'telemetry_events', type_='check')
     op.drop_constraint(op.f('fk_telemetry_events_material_id_materials'), 'telemetry_events', type_='foreignkey')
     op.drop_constraint(op.f('fk_telemetry_events_worker_id_workers'), 'telemetry_events', type_='foreignkey')
+    # dev-phase honesty: downgrade cannot restore NOT NULL while kind rows exist
+    op.execute("DELETE FROM telemetry_events WHERE machine_id IS NULL")
     op.alter_column('telemetry_events', 'machine_id',
                existing_type=sa.INTEGER(),
                nullable=False)

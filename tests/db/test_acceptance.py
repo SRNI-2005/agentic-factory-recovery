@@ -243,16 +243,28 @@ def test_criterion_11_multi_resource(full_pipeline):
 
         # duplicate suppression per kind
         time.sleep(1.0)
-        publish_resource_event(
-            instance_name="factory_demo_01", resource_kind="MACHINE",
-            resource_id="M4", event_type="FAILURE", occurred_at=950,
-            severity="HIGH", message_id=mids["machine"])
+        republish_args = {
+            "machine": dict(resource_kind="MACHINE", resource_id="M4",
+                            event_type="FAILURE", occurred_at=950,
+                            severity="HIGH"),
+            "worker": dict(resource_kind="WORKER", resource_id="W8",
+                           event_type="WORKER_ABSENT", occurred_at=951,
+                           severity="MEDIUM"),
+            "material": dict(resource_kind="MATERIAL", resource_id="MAT-003",
+                             event_type="MATERIAL_SHORTAGE", occurred_at=952),
+        }
+        for kind, extra in republish_args.items():
+            publish_resource_event(instance_name="factory_demo_01",
+                                   message_id=mids[kind], **extra)
         with eng.begin() as c:
-            dup = c.execute(sqltext(
-                "SELECT count(*) FROM telemetry_events te "
-                "JOIN instances i ON i.id = te.instance_id "
-                "WHERE i.name='factory_demo_01' AND te.message_id = :m"
-            ), {"m": mids["machine"]}).scalar_one()
-        assert ok and dup == 1
+            dups = {
+                kind: c.execute(sqltext(
+                    "SELECT count(*) FROM telemetry_events te "
+                    "JOIN instances i ON i.id = te.instance_id "
+                    "WHERE i.name='factory_demo_01' AND te.message_id = :m"
+                ), {"m": mid}).scalar_one()
+                for kind, mid in mids.items()
+            }
+        assert ok and all(v == 1 for v in dups.values())
     finally:
         handle.stop()

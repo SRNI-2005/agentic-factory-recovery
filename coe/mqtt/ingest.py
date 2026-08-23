@@ -84,10 +84,10 @@ class ResourceEventPayload(BaseModel):
             )
         if kind != "MACHINE" and self.estimated_downtime is not None:
             raise ValueError("estimated_downtime is MACHINE-only")
-        if kind != "WORKER" and self.estimated_absence is not None:
-            raise ValueError("estimated_absence is WORKER-only")
-        if kind == "MATERIAL" and (self.estimated_downtime or self.estimated_absence):
-            raise ValueError("MATERIAL events carry no duration")
+        if (
+            kind != "WORKER" or self.event_type != "WORKER_ABSENT"
+        ) and self.estimated_absence is not None:
+            raise ValueError("estimated_absence is WORKER_ABSENT-only")
         return self
 
 
@@ -267,6 +267,10 @@ def ingest_telemetry_event(payload_dict: dict) -> tuple[int, bool]:
                 )
                 row.status = "UNAVAILABLE"
             else:  # WORKER_RETURN closes open absences, restores status
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                    {"k": f"absence:{inst.id}:{worker_id}"},
+                )
                 open_rows = session.scalars(
                     select(WorkerAbsenceWindow).where(
                         WorkerAbsenceWindow.instance_id == inst.id,

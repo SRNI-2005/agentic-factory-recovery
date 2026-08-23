@@ -128,3 +128,40 @@ def test_wrong_duration_field_for_kind_rejected(demo_scenario):
     except PayloadError:
         raised = True
     assert raised
+
+
+def _rejects(payload: dict) -> bool:
+    from coe.mqtt.ingest import PayloadError, ResourceEventPayload
+
+    try:
+        ResourceEventPayload.model_validate({
+            "message_id": "v", "instance_id": "i", "occurred_at": 0, **payload
+        })
+        return False
+    except Exception:
+        return True
+
+
+def test_validator_rejection_matrix():
+    base_worker = {"resource_kind": "WORKER", "worker_id": "W1",
+                   "event_type": "WORKER_ABSENT"}
+    assert _rejects({"event_type": "FAILURE"})                       # no kind, no machine ref
+    assert _rejects({"resource_kind": "WORKER", "worker_id": "W1",
+                     "machine_id": "M1", "event_type": "WORKER_ABSENT"})  # two refs
+    assert _rejects({"resource_kind": "WORKER", "worker_id": "W1",
+                     "event_type": "FAILURE"})                      # wrong domain
+    assert _rejects({**base_worker, "severity": "NOPE"})            # bad severity
+    assert _rejects({**base_worker, "estimated_downtime": 5})       # foreign duration
+    assert _rejects({"resource_kind": "MATERIAL", "material_sku": "S",
+                     "event_type": "MATERIAL_SHORTAGE", "nonsense": 1})  # extra=forbid
+    assert _rejects({"resource_kind": "WORKER", "worker_id": "W1",
+                     "event_type": "WORKER_RETURN",
+                     "estimated_absence": 30})                      # RETURN carries no duration
+    # positive control: valid minimal payload passes validation (raises later at DB, not here)
+    from coe.mqtt.ingest import ResourceEventPayload
+
+    ok = ResourceEventPayload.model_validate({
+        "message_id": "v", "instance_id": "i", "occurred_at": 0,
+        "resource_kind": "WORKER", "worker_id": "W1",
+        "event_type": "WORKER_ABSENT"})
+    assert ok.resource_kind == "WORKER"

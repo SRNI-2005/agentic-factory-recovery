@@ -1,8 +1,10 @@
 # Phase 1: Infrastructure and Data Ingestion
 
-**Status:** Approved
+**Status:** Approved — Amended 2026-08-23 (multi-resource disruption ingestion)
 **Date:** 2026-08-20
 **Phase:** Infrastructure and Data Ingestion
+
+> **Amendment 2026-08-23 (user-approved):** disruptions are no longer machine-only. Worker absence and material shortage enter through the same telemetry pipeline as machine failure. See amended §6.4, §6.5, §9, and §12.11. Rationale: PRD §5 already listed worker-absentee and inventory-shortage scenarios; the DisruptionRecord must represent them.
 
 ## 1. Purpose
 
@@ -377,6 +379,21 @@ An open-ended outage uses a null `downtime_until`. For the same instance and mac
 
 Unplanned failure takes precedence over planned maintenance as the primary reason, and all contributing event IDs are retained in `source_event_ids`. A recovery event closes the open interval. An event carrying `estimated_downtime` creates a finite window (`downtime_until = occurred_at + estimated_downtime`); an event without one creates an open-ended outage (`downtime_until = null`) closed only by a later recovery or restore action. The solver later treats these rows as unavailable time. Worker windows intentionally use positive availability semantics because they originate from rosters; the Phase 2 constraint adapter converts both representations into unavailable intervals before solving.
 
+#### `worker_absence_windows` (Amendment 2026-08-23)
+
+Mirrors machine downtime semantics for people, so absences announced as events get the same union/close/open-ended treatment as machine outages:
+
+- `id`
+- `instance_id`
+- `worker_id`
+- `absence_from`
+- `absence_until` (null = open-ended; closed by a later `WORKER_RETURN`)
+- `reason`
+- `severity`
+- `source_event_ids`
+
+For the same instance and worker, overlapping or touching intervals are unioned into the smallest covering interval under a per-worker advisory lock (same concurrency rule as machine downtime). The solver treats these rows directly as unavailability intervals — unlike roster-derived `worker_availability_windows`, no positive-to-negative conversion is needed.
+
 #### `telemetry_events`
 
 This is a TimescaleDB hypertable partitioned by `occurred_at`.
@@ -384,7 +401,10 @@ This is a TimescaleDB hypertable partitioned by `occurred_at`.
 - `id`
 - `instance_id`
 - `message_id` (unique)
-- `machine_id`
+- `machine_id` (nullable as of Amendment 2026-08-23; set when `resource_kind = MACHINE`)
+- `worker_id` (nullable FK to workers.id; set when `resource_kind = WORKER` — Amendment 2026-08-23)
+- `material_id` (nullable FK to materials.id; set when `resource_kind = MATERIAL` — Amendment 2026-08-23)
+- `resource_kind` (`MACHINE | WORKER | MATERIAL`; CHECK constraint: exactly one of the three resource references is non-null — Amendment 2026-08-23)
 - `event_type`
 - `occurred_at` (Must be >= 0. Negative time crashes CP-SAT.)
 - `received_at` (Must be >= 0)
@@ -396,13 +416,23 @@ This is a TimescaleDB hypertable partitioned by `occurred_at`.
 
 The subscriber is idempotent: duplicate MQTT messages with the same `message_id` do not create duplicate state changes.
 
-The MQTT topic pattern is:
+Valid `event_type` values per resource kind (Amendment 2026-08-23):
+
+| resource_kind | event_type values |
+| --- | --- |
+| `MACHINE` | `FAILURE`, `MAINTENANCE` |
+| `WORKER` | `WORKER_ABSENT`, `WORKER_RETURN` |
+| `MATERIAL` | `MATERIAL_SHORTAGE`, `MATERIAL_RESTOCK` |
+
+The MQTT topic patterns are:
 
 ```text
 factory/{instance_id}/machine/{machine_id}/events
+factory/{instance_id}/worker/{worker_id}/events
+factory/{instance_id}/material/{material_sku}/events
 ```
 
-Incoming failure payloads use this schema:
+Incoming failure payloads use this schema (machine-kind shown; worker- and material-kind payloads substitute `worker_id` / `material_sku` and their event types — Amendment 2026-08-23):
 
 ```json
 {
@@ -417,7 +447,13 @@ Incoming failure payloads use this schema:
 }
 ```
 
-The subscriber validates that the topic and payload identify the same instance and machine. The complete original payload is stored in `payload_json`.
+The subscriber validates that the topic and payload identify the same instance and resource (machine, worker, or material per the topic pattern — Amendment 2026-08-23). The complete original payload is stored in `payload_json`.
+
+**Subscriber routing by resource kind (Amendment 2026-08-23):**
+
+- `MACHINE` events: unchanged behavior — downtime-window union; `FAILURE` sets the machine's status to `FAILED`.
+- `WORKER_ABSENT` / `WORKER_RETURN` events: union into `worker_absence_windows` (§6.5b) under a per-worker advisory lock; `WORKER_ABSENT` sets the worker's status to `UNAVAILABLE`, `WORKER_RETURN` closes an open absence and restores `AVAILABLE`.
+- `MATERIAL_SHORTAGE` / `MATERIAL_RESTOCK` events: telemetry-only. Shortages are *conditions*, not state flips — blocking happens at solve time via the Phase 2 supply check, and receipts remain scenario/strategy-owned (no auto-created receipt rows; runtime inventory transactions stay reserved for a later phase).
 
 ### 6.6 Future-Phase Tables
 
@@ -452,17 +488,21 @@ Runtime configuration is loaded from environment variables using `pydantic-setti
 
 ## 9. MQTT Ingestion Slice
 
-Phase 1 proves the minimal event path:
+Phase 1 proves the minimal event path (Amendment 2026-08-23: three resource kinds):
 
 ```text
 edge_stub.py
     -> Mosquitto
     -> subscriber.py
     -> telemetry_events
-    -> machine_downtime_windows
+    -> machine_downtime_windows   (MACHINE events)
+    -> worker_absence_windows     (WORKER events)
+    -> telemetry only             (MATERIAL events)
 ```
 
-The subscriber stores both normalized fields and the original JSON payload. On `FAILURE` events it also sets the affected machine's status to `FAILED`; restoration is handled by later phases. The full narrative-to-structured translation agent belongs to Phase 3.
+The subscriber stores both normalized fields and the original JSON payload. On machine `FAILURE` events it also sets the affected machine's status to `FAILED`; on `WORKER_ABSENT` it sets the worker to `UNAVAILABLE`; material events create no state beyond telemetry. Restoration is handled by later phases. The full narrative-to-structured translation agent belongs to Phase 3.
+
+CLI test commands cover all three kinds: `mqtt test-failure` (machine), `mqtt test-absence` (worker), `mqtt test-shortage` (material).
 
 ## 10. Command Interface
 
@@ -507,7 +547,7 @@ Phase 1 is complete when:
 8. `scenario_sources` records every source contribution and transformation.
 9. Worker, material, availability, setup, and telemetry tables populate with deterministic seeded data.
 10. Re-running the builder with the same seed produces identical output; a failed transformation leaves no partial scenario.
-11. A test MQTT event is stored once, partitions by `occurred_at`, and creates the expected machine downtime interval.
+11. A test MQTT event is stored once, partitions by `occurred_at`, and creates the expected machine downtime interval. *(Amendment 2026-08-23: equivalently for the other kinds — a `WORKER_ABSENT` event is stored once, unions into `worker_absence_windows`, and flips the worker to `UNAVAILABLE`; a `MATERIAL_SHORTAGE` event is stored once as telemetry with no derived state.)*
 
 ## 13. Phase Boundary
 
