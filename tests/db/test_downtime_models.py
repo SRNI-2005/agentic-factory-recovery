@@ -24,7 +24,7 @@ def _event(inst_id, machine_id, **over):
     base = dict(
         occurred_at=10, instance_id=inst_id, message_id="m-1",
         machine_id=machine_id, event_type="FAILURE",
-        received_at=10, payload_json={},
+        received_at=10, payload_json={}, resource_kind="MACHINE",
     )
     base.update(over)
     return TelemetryEvent(**base)
