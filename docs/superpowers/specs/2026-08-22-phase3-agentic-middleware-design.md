@@ -136,6 +136,8 @@ Common fields across all kinds: `kind`, `instance_id`, `event_type`, `occurred_a
 
 Scope: one disruption per run. A record names exactly one resource of one kind; narratives describing multiple simultaneous disruptions are rejected with a clear error (repeat the command per resource). Multi-record translation remains a documented future extension, not a Phase 3 deliverable.
 
+**Future extension — quiescence batching (design intent, deliberately not built):** sequential per-record runs can churn under correlated bursts (run 1 may commit work onto resources whose failure arrives moments later as run 2's input). The intended eventual remedy is a debounce window, not multi-resource records: coalesce disruptions arriving within `RECOVERY_DEBOUNCE_SECONDS` into the next single solve, bounded by `max_delay` so batching never stalls response indefinitely, with CRITICAL-severity events bypassing the window. Worst case degrades gracefully to today's behavior plus bounded latency. Deferred because no Phase 3–5 benchmark exercises burst arrivals.
+
 Validation layers:
 
 1. Pydantic discriminated union: per-kind enums for `event_type` (per Phase 1 §6.5 table), severities, `occurred_at >= 0`, and presence/absence of the correct duration field per kind.
