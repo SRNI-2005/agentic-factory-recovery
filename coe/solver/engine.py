@@ -72,20 +72,35 @@ def _schedule_span(payload: dict, frozen_echo: list,
     downtime = sum(wdw["until"] - wdw["from"]
                    for wdw in (machine_downtime or [])
                    if wdw["until"] is not None)
-    # RIDER (task-13): sequence-dependent setups consume real time between
-    # ops (§6.6), so reserve each machine's largest positive setup once —
-    # the same per-machine accounting as the §6.7 horizon — else tight
-    # schedules clip against the variable upper bound.
-    max_setup_per_machine: dict[str, int] = {}
+    # RIDER (task-13 review): sequence-dependent setups consume real time
+    # between ops (§6.6), and they STACK: a machine running n pending ops
+    # needs up to n-1 inter-op transitions plus at most one initial-family
+    # setup. Reserving only one overall maximum under-counted multi-
+    # transition stacks and produced false INFEASIBLEs, so reserve per
+    # machine: transitions_m * max_row_m.
+    init_fam = payload.get("machine_initial_families") or {}
+    max_row: dict[str, int] = {}
+    init_positive: set[str] = set()
     for row in payload["setup_times"]:
         d = int(row["duration"])
         if d > 0:
             mid = row["machine_id"]
-            max_setup_per_machine[mid] = max(
-                max_setup_per_machine.get(mid, 0), d)
+            max_row[mid] = max(max_row.get(mid, 0), d)
+            if row.get("from_family") == init_fam.get(mid):
+                init_positive.add(mid)
+    setup_headroom = 0
+    for mid in sorted(max_row):
+        eligible = sum(
+            1 for job in payload["jobs"] for op in job["operations"]
+            if op["status"] == "PENDING"
+            and any(alt["machine_id"] == mid
+                    for alt in op["alternatives"]))
+        if not eligible:
+            continue
+        transitions = eligible - 1 + (mid in init_positive)
+        setup_headroom += transitions * max_row[mid]
     return max(1, release + frozen_end + processing + unavail + downtime
-               + max(receipt_times or [0])
-               + sum(max_setup_per_machine.values()))
+               + max(receipt_times or [0]) + setup_headroom)
 
 
 def echo_assignment(job, op) -> dict:
@@ -388,11 +403,11 @@ def solve(payload: dict) -> dict:
     makespan_var = model.NewIntVar(0, span, "makespan")
     model.AddMaxEquality(makespan_var, all_ends or [0])
 
-    if normalize:
-        obj_expr = alpha * makespan_var / horizon + sum(
-            (w / horizon) * t for w, t in tardy_vars)
-    else:
-        obj_expr = alpha * makespan_var + sum(w * t for w, t in tardy_vars)
+    # DEVIATION (task-14): ortools forbids division on linear expressions,
+    # so the model minimizes the unscaled weighted sum; normalization (§9)
+    # divides by horizon > 0, a positive scale that preserves the argmin,
+    # while finish() reports the normalized ratio.
+    obj_expr = alpha * makespan_var + sum(w * t for w, t in tardy_vars)
     model.Minimize(obj_expr)
 
     solver = CpSolver()
