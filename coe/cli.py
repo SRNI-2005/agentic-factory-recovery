@@ -43,6 +43,17 @@ def build_parser() -> argparse.ArgumentParser:
     tf.add_argument("--machine", default="M3")
     tf.add_argument("--at", type=int, default=512)
 
+    ta = mq_sub.add_parser("test-absence")
+    ta.add_argument("--instance", default="factory_demo_01")
+    ta.add_argument("--worker", default="W3")
+    ta.add_argument("--at", type=int, default=480)
+    ta.add_argument("--duration", type=int, default=None)
+
+    ts = mq_sub.add_parser("test-shortage")
+    ts.add_argument("--instance", default="factory_demo_01")
+    ts.add_argument("--sku", default="MAT-001")
+    ts.add_argument("--at", type=int, default=300)
+
     return parser
 
 
@@ -127,6 +138,87 @@ def main(argv=None) -> None:
                 print(f"OK: telemetry id stored once for message {mid}")
                 raise SystemExit(0)
             raise SystemExit("FAIL: event did not reach telemetry_events within 5s")
+
+        if args.mqtt_cmd == "test-absence":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_resource_event
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            try:
+                mid = publish_resource_event(
+                    instance_name=args.instance, resource_kind="WORKER",
+                    resource_id=args.worker, event_type="WORKER_ABSENT",
+                    occurred_at=args.at, severity="MEDIUM",
+                    reason="cli_proof", duration=args.duration,
+                )
+                deadline = time.time() + 5
+                engine = make_engine()
+                found = False
+                while time.time() < deadline and not found:
+                    with engine.begin() as c:
+                        n = c.execute(text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid"),
+                            {"inst": args.instance, "mid": mid}).scalar_one()
+                        win = c.execute(text(
+                            "SELECT count(*) FROM worker_absence_windows w "
+                            "JOIN instances i ON i.id = w.instance_id "
+                            "JOIN workers wk ON wk.instance_id = i.id "
+                            "AND wk.name = :w WHERE i.name = :inst "
+                            "AND w.absence_from <= :at AND "
+                            "(w.absence_until IS NULL OR w.absence_until > :at)"),
+                            {"inst": args.instance, "w": args.worker,
+                             "at": args.at}).scalar_one()
+                    found = n == 1 and win >= 1
+                    if not found:
+                        time.sleep(0.25)
+                if found:
+                    print(f"OK: WORKER_ABSENT stored once with absence window ({mid})")
+                    raise SystemExit(0)
+                raise SystemExit("FAIL: absence not fully ingested within 5s")
+            finally:
+                handle.stop()
+
+        if args.mqtt_cmd == "test-shortage":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_resource_event
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            try:
+                mid = publish_resource_event(
+                    instance_name=args.instance, resource_kind="MATERIAL",
+                    resource_id=args.sku, event_type="MATERIAL_SHORTAGE",
+                    occurred_at=args.at, severity="LOW", reason="cli_proof",
+                )
+                deadline = time.time() + 5
+                engine = make_engine()
+                found = False
+                while time.time() < deadline and not found:
+                    with engine.begin() as c:
+                        n = c.execute(text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid "
+                            "AND te.resource_kind = 'MATERIAL'"),
+                            {"inst": args.instance, "mid": mid}).scalar_one()
+                    found = n == 1
+                    if not found:
+                        time.sleep(0.25)
+                if found:
+                    print(f"OK: MATERIAL_SHORTAGE stored once ({mid})")
+                    raise SystemExit(0)
+                raise SystemExit("FAIL: shortage not ingested within 5s")
+            finally:
+                handle.stop()
 
 
 if __name__ == "__main__":
