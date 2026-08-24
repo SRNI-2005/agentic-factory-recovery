@@ -4,8 +4,12 @@ H = max( Σ op-max-processing + Σ per-machine max-setup + Σ temporary downtime
          max frozen end, max release time, 1 )
 
 All inputs are payload-shaped plain dicts; permanent downtimes (`until is None`)
-are excluded because their machine never reaches the engine.
+are excluded because their machine never reaches the engine. Overlapping
+temporary windows are unioned first so shared minutes are counted once
+(amendment 2026-08-24 third).
 """
+
+from coe.solver.windows import merge_intervals
 
 
 def _op_max_duration(op: dict) -> int:
@@ -29,8 +33,9 @@ def compute_horizon(*, jobs, machine_downtime, setup_times, frozen_max_end: int 
         max_setup_per_machine[mid] = max(max_setup_per_machine.get(mid, 0), row["duration"])
     setups = sum(max_setup_per_machine.values())
     downtime = sum(
-        w["until"] - w["from"] for w in machine_downtime if w["until"] is not None
-    )
+        e - s for s, e in merge_intervals(
+            [(w["from"], w["until"]) for w in machine_downtime
+             if w["until"] is not None]))
     releases = [j["release_time"] for j in jobs]
     return max(processing + setups + downtime, frozen_max_end,
                max(releases) if releases else 0, 1)

@@ -11,11 +11,6 @@ from ortools.sat.python.cp_model import CpModel, CpSolver
 
 from coe.solver.horizon import compute_horizon
 
-_STATUS_NAME = {
-    cp_model.OPTIMAL: "OPTIMAL",
-    cp_model.FEASIBLE: "FEASIBLE",
-}
-
 
 def _validate_config(cfg: dict) -> None:
     alpha = float(cfg.get("alpha", 1.0))
@@ -615,10 +610,20 @@ def solve(payload: dict) -> dict:
     status_code = solver.Solve(model)
     duration = round(time.monotonic() - t0, 6)
 
-    label = _STATUS_NAME.get(status_code, "INFEASIBLE")
-    if label == "INFEASIBLE":
+    # Status honesty (amendment 2026-08-24 third): UNKNOWN passes through as
+    # "UNKNOWN"; INFEASIBLE strictly means proven impossibility.
+    if status_code == cp_model.OPTIMAL:
+        label = "OPTIMAL"
+    elif status_code == cp_model.FEASIBLE:
+        label = "FEASIBLE"
+    elif status_code == cp_model.INFEASIBLE:
+        label = "INFEASIBLE"
+    else:
+        label = "UNKNOWN"
+    if label in ("INFEASIBLE", "UNKNOWN"):
         # CONTRACT deviation from listing: frozen echoes are retained on
-        # INFEASIBLE; only the live set is emptied (Interfaces §13 bullet).
+        # INFEASIBLE/UNKNOWN; only the live set is emptied (Interfaces §13
+        # bullet).
         assignments = [echo_assignment(j, o) for j, o in frozen_echo]
         mk = max((a["end"] for a in assignments), default=0)
         return finish(label, assignments, mk,

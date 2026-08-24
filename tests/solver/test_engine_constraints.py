@@ -207,3 +207,22 @@ def test_open_worker_window_rejected():
                                    "until": None}]
     with pytest.raises(ValueError):
         solve(p)
+
+
+def test_unknown_budget_reports_unknown(monkeypatch):
+    from ortools.sat.python import cp_model as cm
+
+    from coe.solver import engine
+
+    class FakeSolver:
+        class parameters:
+            pass
+
+        def Solve(self, model):
+            return cm.UNKNOWN
+
+    monkeypatch.setattr(engine, "CpSolver", FakeSolver)
+    r = solve(_fx("worker_no_overlap"))
+    assert r["status"] == "UNKNOWN"
+    assert [x for x in r["assignments"]
+            if not x["is_frozen"]] == []

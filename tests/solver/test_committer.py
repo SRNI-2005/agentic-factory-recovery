@@ -68,6 +68,11 @@ def test_commit_refuses_infeasible(built_db, solved_mk01):
         with pytest.raises(ValueError):
             commit_solution(session, instance_row=_inst(session),
                             payload=payload, solution=bogus)
+    bogus["status"] = "UNKNOWN"
+    with session_scope() as session:
+        with pytest.raises(ValueError):
+            commit_solution(session, instance_row=_inst(session),
+                            payload=payload, solution=bogus)
 
 
 def test_commit_atomic_on_garbage(built_db, solved_mk01):

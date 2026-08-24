@@ -486,18 +486,20 @@ def build_payload(
     ]
     blocked_operations = suspended_entries + blocked_operations
 
-    # ---- material physics inputs for the engine reservoir (§6.11) ----
-    in_horizon_receipts = [
+    # ---- material physics inputs for the engine reservoir (§6.11,
+    # amendment 2026-08-24 third) ----
+    # ALL receipts are emitted regardless of horizon: post-horizon refills are
+    # inert to the solver but audit-relevant, and a deferred operation must see
+    # its delivery. Capacity is restated as initial stock at t = 0; arrivals
+    # enter exclusively as refill events (no double-counting).
+    all_receipts = [
         {"sku": sku, "quantity": r.quantity, "available_at": r.available_at}
-        for r, sku in receipt_rows if r.available_at < horizon
+        for r, sku in receipt_rows
     ]
-    in_horizon_receipts.sort(
+    all_receipts.sort(
         key=lambda d: (d["sku"], d["available_at"], d["quantity"]))
-    capacity_by_sku = dict(stock_by_sku)
-    for r in in_horizon_receipts:
-        capacity_by_sku[r["sku"]] += r["quantity"]
-    materials_out = [{"sku": s, "capacity": capacity_by_sku[s]}
-                     for s in sorted(capacity_by_sku)]
+    materials_out = [{"sku": s, "capacity": stock_by_sku.get(s, 0)}
+                     for s in sorted(stock_by_sku)]
 
     # ---- initial family seeding from the active snapshot ----
     machine_initial_families: dict[str, str] = {}
@@ -548,7 +550,7 @@ def build_payload(
         "jobs": payload_jobs,
         "machine_downtime": downtime_entries,
         "materials": materials_out,
-        "material_receipts": in_horizon_receipts,
+        "material_receipts": all_receipts,
         "worker_unavailability": worker_unavailability,
         "setup_times": setup_entries,
         "blocked_operations": blocked_operations,

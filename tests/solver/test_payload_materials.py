@@ -15,34 +15,29 @@ def _build(session, inst):
 
 
 def test_factory_materials_capacities_match_db(demo_session):
+    """Capacity is initial stock at t=0 (amendment 2026-08-24 third)."""
     session, inst = demo_session
     p = _build(session, inst)
     skus = [m["sku"] for m in p["materials"]]
     assert skus == sorted(skus) and len(skus) == 8
 
-    row = session.execute(text(
-        "SELECT m.sku, m.initial_stock, "
-        "  COALESCE(SUM(CASE WHEN r.available_at < :h THEN r.quantity END), 0) "
-        "FROM materials m "
-        "LEFT JOIN material_receipts r ON r.material_id = m.id "
-        "WHERE m.instance_id = :i GROUP BY m.sku, m.initial_stock"),
-        {"i": inst.id, "h": 10 ** 9}).all()
-    # recompute per-sku with the payload's own horizon for exactness:
-    from coe.solver.horizon import compute_horizon
-
-    H = compute_horizon(jobs=p["jobs"],
-                        machine_downtime=p["machine_downtime"],
-                        setup_times=p["setup_times"])
-    expected = {}
-    for sku, stock, _ in row:
-        rec = session.execute(text(
-            "SELECT COALESCE(SUM(r.quantity),0) FROM material_receipts r "
-            "JOIN materials m ON m.id = r.material_id "
-            "WHERE m.instance_id = :i AND m.sku = :s AND r.available_at < :h"),
-            {"i": inst.id, "s": sku, "h": H}).scalar_one()
-        expected[sku] = stock + rec
+    rows = session.execute(text(
+        "SELECT sku, initial_stock FROM materials "
+        "WHERE instance_id = :i"), {"i": inst.id}).all()
+    expected = {sku: stock for sku, stock in rows}
     got = {m["sku"]: m["capacity"] for m in p["materials"]}
     assert got == expected
+
+
+def test_all_receipts_emitted_regardless_of_horizon(demo_session):
+    session, inst = demo_session
+    p = _build(session, inst)
+    total = session.execute(text(
+        "SELECT count(*) FROM material_receipts WHERE instance_id = :i"),
+        {"i": inst.id}).scalar_one()
+    assert total > 0
+    assert len(p["material_receipts"]) == total
+    assert max(r["available_at"] for r in p["material_receipts"]) >= 2000
 
 
 def test_operation_demands_mirror_bom(demo_session):

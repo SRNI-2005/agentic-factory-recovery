@@ -48,3 +48,14 @@ def test_empty_is_one():
 def test_completed_ops_excluded():
     jobs = [{"release_time": 0, "operations": [_op({"M0": 999}, status="COMPLETED")]}]
     assert compute_horizon(jobs=jobs, machine_downtime=[], setup_times=[]) == 1
+
+
+def test_overlapping_downtime_counted_once():
+    jobs = [{"release_time": 0,
+             "operations": [_op({"M0": 10})]}]
+    h = compute_horizon(
+        jobs=jobs,
+        machine_downtime=[{"machine_id": "M0", "from": 100, "until": 160},
+                          {"machine_id": "M0", "from": 120, "until": 180}],
+        setup_times=[])
+    assert h == 10 + 80

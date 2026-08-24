@@ -58,6 +58,11 @@ def _solve_common(session, inst, payload, *, now=None,
     from coe.solver.invariants import check_solution
 
     solution = solve(payload)
+    if solution["status"] not in ("OPTIMAL", "FEASIBLE"):
+        raise SystemExit(
+            f"solver returned {solution['status']} — nothing committed "
+            "(UNKNOWN: increase --time-limit; INFEASIBLE: constraint/"
+            "material conflict)")
     problems = check_solution(payload, solution)
     if problems:
         raise SystemExit("INVARIANT VIOLATIONS:\n"
