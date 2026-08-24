@@ -474,6 +474,9 @@ def solve(payload: dict) -> dict:
                     worker_iv.setdefault(w, []).append(iv)
                 combos.append({"lit": lit, "machine": m, "worker": w,
                                "dur": d, "start": s, "end": e})
+            if not combos:
+                raise ValueError(
+                    f"operation {oid_} has no eligible combinations")
             model.AddExactlyOne([c["lit"] for c in combos])
             combo_by_op[oid_] = combos
 

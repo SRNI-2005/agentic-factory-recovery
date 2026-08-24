@@ -8,8 +8,6 @@ Conventions:
 - every collection query carries an explicit ORDER BY (repo determinism rule).
 - intervals are half-open [from, until).
 """
-from sqlalchemy import select
-
 from coe.db.models.downtime import (
     MachineDowntimeWindow,
     TelemetryEvent,
@@ -272,7 +270,7 @@ def build_payload(
                 "processing_time": level,
                 "workers": workers,
             })
-        if not entry["alternatives"] and recovering:
+        if not entry["alternatives"]:
             entry["status"] = "BLOCKED"
             entry["alternatives"] = []
 
@@ -455,6 +453,15 @@ def build_payload(
                     {"operation_id": e["operation_id"],
                      **blocked_map[e["operation_id"]]})
     warnings.extend(mat_warnings)
+
+    setup_pairs = {(s["machine_id"], s["from_family"], s["to_family"])
+                   for s in setup_entries}
+    for m, ff, tf in sorted(setup_pairs,
+                            key=lambda t: (t[0], t[1] or "", t[2] or "")):
+        if ff is not None and tf is not None and (m, tf, ff) not in setup_pairs:
+            warnings.append({"type": "SETUP_MATRIX_ASYMMETRIC",
+                             "machine_id": m, "from_family": ff,
+                             "to_family": tf})
 
     # ---- suspension memory entries (rider c): one per op of a BLOCKED job ----
     suspended_entries = [

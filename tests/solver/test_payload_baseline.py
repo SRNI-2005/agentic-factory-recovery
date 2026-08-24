@@ -154,3 +154,64 @@ def test_mk01_benchmark_path_degrades_gracefully(mk01_session):
         for op in job["operations"]:
             for alt in op["alternatives"]:
                 assert alt["workers"] == {}     # no worker layer on source instance
+
+
+# ---------- final-review regressions ----------
+
+def test_failed_status_dead_end_blocks_on_baseline(demo_session):
+    """Rider-d gap: FAILED-status stripping on BASELINE must dead-end-block,
+    never leak a zero-combo pending op into the engine."""
+    from coe.db.models.fjsp import Machine, OperationMachineAlternative
+
+    session, inst = demo_session
+    rows = (session.query(OperationMachineAlternative.operation_id,
+                          OperationMachineAlternative.machine_id)
+            .filter(OperationMachineAlternative.instance_id == inst.id)
+            .order_by(OperationMachineAlternative.operation_id,
+                      OperationMachineAlternative.machine_id).all())
+    per: dict[int, list[int]] = {}
+    for oid_, mid in rows:
+        per.setdefault(oid_, []).append(mid)
+    solo_mid = next(mids[0] for mids in per.values() if len(mids) == 1)
+    session.query(Machine).filter(Machine.id == solo_mid).update(
+        {Machine.status: "FAILED"})
+    session.flush()
+    p = build_payload(session, instance_row=inst, alpha=1.0, beta=1.0,
+                      time_limit_seconds=30)
+    reasons = {b["reason"] for b in p["blocked_operations"]}
+    assert "NO_CAPABLE_MACHINES" in reasons
+
+
+def test_setup_matrix_asymmetric_warning(demo_session):
+    """Spec §3.1 hygiene: a named setup pair whose reverse row is missing on
+    the same machine emits exactly one SETUP_MATRIX_ASYMMETRIC warning."""
+    from coe.db.models.fjsp import JobFamily, Machine, SetupTime
+
+    session, inst = demo_session
+    m0 = (session.query(Machine)
+          .filter(Machine.instance_id == inst.id, Machine.name == "M0")
+          .one())
+    fams = (session.query(JobFamily)
+            .filter(JobFamily.instance_id == inst.id)
+            .order_by(JobFamily.id).limit(2).all())
+    assert len(fams) == 2
+    fa, fb = fams
+    stale = (session.query(SetupTime)
+             .filter(SetupTime.instance_id == inst.id,
+                     SetupTime.machine_id == m0.id,
+                     SetupTime.from_family_id.in_([fa.id, fb.id]),
+                     SetupTime.to_family_id.in_([fa.id, fb.id]))
+             .all())
+    for row in stale:
+        session.delete(row)
+    session.add(SetupTime(instance_id=inst.id, machine_id=m0.id,
+                          from_family_id=fa.id, to_family_id=fb.id,
+                          setup_duration=7, source="review-fixture"))
+    session.flush()
+    p = build_payload(session, instance_row=inst, alpha=1.0, beta=1.0,
+                      time_limit_seconds=30)
+    warns = [w for w in p["warnings"]
+             if w["type"] == "SETUP_MATRIX_ASYMMETRIC"]
+    assert warns == [{"type": "SETUP_MATRIX_ASYMMETRIC",
+                      "machine_id": "M0",
+                      "from_family": fa.name, "to_family": fb.name}]

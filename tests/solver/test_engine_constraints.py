@@ -78,6 +78,14 @@ def test_worker_unavailability_delays_start():
     assert (a["start"], a["end"]) == (100, 110)
 
 
+def test_worker_duration_selection_forced_to_slower():
+    """Tier-2b: worker-specific durations are first-class combos — with W1
+    unavailable, the engine must pick W4 at its own (slower) duration."""
+    sol, a = _one(_fx("worker_duration_selection"))
+    assert a["worker_id"] == "W4"
+    assert (a["start"], a["end"]) == (0, 20)
+
+
 def test_no_worker_fallback_uses_machine_duration():
     _, a = _one(_fx("no_worker_fallback"))
     assert a["worker_id"] is None

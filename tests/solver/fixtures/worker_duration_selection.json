@@ -1,0 +1,22 @@
+{
+  "instance_id": "fx",
+  "schedule_type": "BASELINE",
+  "parent_version_id": null,
+  "config": {"alpha": 1.0, "beta": 1.0, "time_limit_seconds": 60,
+             "normalize_objectives": false},
+  "machines": ["M0"],
+  "machine_initial_families": {},
+  "warnings": [],
+  "jobs": [
+    {"job_id": "J1", "family_id": null, "release_time": 0, "deadline": null,
+     "priority": 1,
+     "operations": [{"operation_id": "J1-O1", "sequence": 1, "status": "PENDING",
+                     "alternatives": [{"machine_id": "M0", "processing_time": 10,
+                                       "workers": {"W1": 10, "W4": 20}}],
+                     "frozen": null}]}
+  ],
+  "machine_downtime": [],
+  "worker_unavailability": [{"worker_id": "W1", "from": 0, "until": 10000}],
+  "setup_times": [],
+  "blocked_operations": []
+}
