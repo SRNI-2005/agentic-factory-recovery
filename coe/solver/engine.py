@@ -118,6 +118,137 @@ def echo_assignment(job, op) -> dict:
     }
 
 
+def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
+                 circuit_info=None, fam_of=None, setup_lookup=None) -> None:
+    """DEVIATION (task-17, integration finding): the spec pins
+    num_search_workers=1 for determinism (spec §12 env table), but at demo
+    scale (168 ops x ~24 combos) the single-worker search behind the §6.6
+    AddCircuit setup layer found no feasible point within 240s (14-job slice:
+    131 solutions only after 120s), so baseline recovery never commits. This
+    warm-starts CP-SAT's hint-repair with a deterministic list schedule:
+    min-completion pointer dispatch (ties by job_id then sequence), setups and
+    machine downtime and worker unavailability respected, append-only per
+    machine so the hinted time order matches the hinted circuit order. Only
+    the material reservoir is left for repair (presolve proves it trivial on
+    this data). Purely a search aid: optimal set, seed and worker count are
+    untouched, so §6.13 determinism holds."""
+    release_of: dict[str, int] = {}
+    for j, _ in pending:
+        release_of.setdefault(j["job_id"], j["release_time"])
+
+    mach_busy: dict[str, list[list[int]]] = {}
+    work_busy: dict[str, list[list[int]]] = {}
+
+    def _blocks(busy, key, s, e):
+        busy.setdefault(key, []).append([s, e])
+
+    for wd in payload["machine_downtime"]:
+        u = wd["until"] if wd["until"] is not None else 10 ** 9
+        if u > wd["from"]:
+            _blocks(mach_busy, wd["machine_id"], wd["from"], u)
+    for uw in payload["worker_unavailability"]:
+        u = uw["until"] if uw["until"] is not None else 10 ** 9
+        if u > uw["from"]:
+            _blocks(work_busy, uw["worker_id"], uw["from"], u)
+
+    def _fit(blocks_list, nb, d):
+        t = nb
+        moved = True
+        while moved:
+            moved = False
+            for bs, be in blocks_list:
+                if bs < t + d and t < be:
+                    t = be
+                    moved = True
+        return t
+
+    def _fit_pref(blocks_list, nb, pre, d):
+        """Earliest s >= nb with [s-pre, s+d) disjoint from blocks."""
+        s = max(nb, pre)
+        moved = True
+        while moved:
+            moved = False
+            for bs, be in blocks_list:
+                if bs < s + d and s - pre < be:
+                    s = be + pre
+                    moved = True
+        return s
+
+    fam_of = fam_of or {}
+    setup_lookup = setup_lookup or {}
+    init_fam = payload.get("machine_initial_families") or {}
+    ops_by_job: dict[str, dict[int, dict]] = {}
+    for j, o in pending:
+        ops_by_job.setdefault(j["job_id"], {})[o["sequence"]] = o
+
+    last_end: dict[str, int] = {}
+    mach_order: dict[str, list[str]] = {}
+    mach_last_end: dict[str, int] = {}
+    mach_last_fam: dict[str, object] = dict(init_fam)
+    while any(seqs for seqs in ops_by_job.values()):
+        best = None
+        for jid in sorted(ops_by_job):
+            seqs = ops_by_job[jid]
+            if not seqs:
+                continue
+            seq = min(seqs)
+            o = seqs[seq]
+            nb_job = max(release_of.get(jid, 0), last_end.get(jid, 0))
+            for c in combo_by_op[o["operation_id"]]:
+                m = c["machine"]
+                pre = int(setup_lookup.get(
+                    (m, mach_last_fam.get(m),
+                     fam_of.get(o["operation_id"])), 0))
+                s = _fit_pref(mach_busy.get(m, []),
+                              max(nb_job, mach_last_end.get(m, 0)),
+                              pre, c["dur"])
+                if c["worker"]:
+                    sw = _fit(work_busy.get(c["worker"], []), s, c["dur"])
+                    while sw != s:
+                        s = _fit_pref(mach_busy.get(m, []), sw, pre,
+                                      c["dur"])
+                        sw = _fit(work_busy.get(c["worker"], []), s,
+                                  c["dur"])
+                key = (s + c["dur"], m, c["worker"] or "")
+                if best is None or key < best[0]:
+                    best = (key, jid, seq, o, c, s, pre)
+        _, jid, seq, o, chosen, s, pre = best
+        oid_ = o["operation_id"]
+        m = chosen["machine"]
+        e = s + chosen["dur"]
+        _blocks(mach_busy, m, s - pre, e)
+        if chosen["worker"]:
+            _blocks(work_busy, chosen["worker"], s, e)
+        model.AddHint(chosen["lit"], 1)
+        for c in combo_by_op[oid_]:
+            if c is not chosen:
+                model.AddHint(c["lit"], 0)
+        model.AddHint(chosen["start"], min(s, span))
+        model.AddHint(chosen["end"], min(e, span))
+        last_end[jid] = e
+        mach_order.setdefault(m, []).append(oid_)
+        mach_last_end[m] = e
+        mach_last_fam[m] = fam_of.get(oid_)
+        del ops_by_job[jid][seq]
+
+    # ---- complete the hint over the §6.6 circuit literals ----
+    for m in sorted(circuit_info or {}):
+        ci = circuit_info[m]
+        order = [o for o in mach_order.get(m, []) if o in set(ci["oids"])]
+        pairs = set(zip(order, order[1:]))
+        oset = set(order)
+        model.AddHint(ci["idle"], 0 if order else 1)
+        for o in ci["oids"]:
+            model.AddHint(ci["on"][o], 1 if o in oset else 0)
+            model.AddHint(ci["first"][o],
+                          1 if order and o == order[0] else 0)
+            model.AddHint(ci["last"][o],
+                          1 if order and o == order[-1] else 0)
+        for (a, b), lit in ci["arcs"].items():
+            model.AddHint(lit, 1 if (a, b) in pairs else 0)
+
+
+
 def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
     """Sequence-dependent setups via AddCircuit with dummy nodes (§6.6).
 
@@ -125,7 +256,8 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
     optional node tied to its machine-assignment literals. Arc transits are 0;
     setups are explicit optional intervals [start_j - d, start_j) gated by the
     incoming arc literal (family pairs are static, so no dynamic AND needed).
-    Returns {operation_id: [(arc_literal, minutes), ...]} for extraction."""
+    Returns ({operation_id: [(arc_literal, minutes), ...]},
+             {machine: circuit-literal bookkeeping for hinting})."""
     lookup: dict[tuple[str, str | None, str], int] = {}
     for row in payload["setup_times"]:
         d = int(row["duration"])
@@ -141,6 +273,9 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
             mach_ops.setdefault(c["machine"], []).append(op["operation_id"])
 
     setup_choices: dict[str, list[tuple[object, int]]] = {}
+    # DEVIATION (task-17): circuit literals are returned so _greedy_hint can
+    # emit a complete warm start (see _greedy_hint docstring).
+    circuit_info: dict[str, dict] = {}
 
     # determinism: machines in sorted order, oids in first-appearance order
     for m in sorted(mach_ops):
@@ -158,6 +293,9 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
 
         on = {o: model.NewBoolVar(f"on_{m}_{o}") for o in oids}
         idle = model.NewBoolVar(f"idle_{m}")
+        first = {}
+        last = {}
+        arc_lit: dict[tuple[str, str], object] = {}
         arcs: list[tuple[int, int, object]] = []
         arcs.append((0, 1, idle))            # S->E iff nothing lands here
         # DEVIATION from brief listing: ortools 9.15 rejects None as an arc
@@ -177,21 +315,21 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
             # literal and the circuit over-subscribes Start (INFEASIBLE).
             # Dedicated literals are the real incoming/outgoing arcs; the
             # circuit ties them to on[o] via the self-loop.
-            first = model.NewBoolVar(f"fst_{m}_{o}")
-            last = model.NewBoolVar(f"lst_{m}_{o}")
+            first[o] = model.NewBoolVar(f"fst_{m}_{o}")
+            last[o] = model.NewBoolVar(f"lst_{m}_{o}")
             arcs.append((node[o], node[o], on[o].Not()))
-            arcs.append((0, node[o], first))
+            arcs.append((0, node[o], first[o]))
             d_init = d_of(init_fam.get(m), f[o])
             if d_init > 0:
                 # Anchor: the initial setup cannot precede time zero (nothing
                 # else on the machine forces this; non-first positions are
                 # covered by predecessor overlap).
-                model.Add(sv >= d_init).OnlyEnforceIf(first)
+                model.Add(sv >= d_init).OnlyEnforceIf(first[o])
                 iv = model.NewOptionalIntervalVar(
-                    sv - d_init, d_init, sv, first, f"su_{m}_init_{o}")
+                    sv - d_init, d_init, sv, first[o], f"su_{m}_init_{o}")
                 machine_iv.setdefault(m, []).append(iv)
-                setup_choices.setdefault(o, []).append((first, d_init))
-            arcs.append((node[o], 1, last))
+                setup_choices.setdefault(o, []).append((first[o], d_init))
+            arcs.append((node[o], 1, last[o]))
 
         for a in oids:
             for b in oids:
@@ -199,6 +337,7 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
                     continue
                 arc = model.NewBoolVar(f"arc_{m}_{a}_{b}")
                 arcs.append((node[a], node[b], arc))
+                arc_lit[(a, b)] = arc
                 # DEVIATION from brief listing: circuit succession must
                 # constrain time, else the solver runs ops opposite to their
                 # arc order and parks the setup interval before t=0.
@@ -214,8 +353,10 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
                     setup_choices.setdefault(b, []).append((arc, d))
 
         model.AddCircuit(arcs)
+        circuit_info[m] = {"oids": oids, "on": on, "idle": idle,
+                           "first": first, "last": last, "arcs": arc_lit}
 
-    return setup_choices
+    return setup_choices, circuit_info, lookup
 
 
 def solve(payload: dict) -> dict:
@@ -362,9 +503,10 @@ def solve(payload: dict) -> dict:
         worker_iv.setdefault(uw["worker_id"], []).append(iv)
 
     fam_of = {ob["operation_id"]: jb.get("family_id") for jb, ob in pending}
-    setup_choices = _add_setups(model, payload=payload, pending=pending,
-                                combo_by_op=combo_by_op,
-                                machine_iv=machine_iv, fam_of=fam_of)
+    setup_choices, circuit_info, setup_rows = _add_setups(
+        model, payload=payload, pending=pending,
+        combo_by_op=combo_by_op,
+        machine_iv=machine_iv, fam_of=fam_of)
 
     for ivs in machine_iv.values():
         if len(ivs) > 1:
@@ -409,6 +551,10 @@ def solve(payload: dict) -> dict:
     # while finish() reports the normalized ratio.
     obj_expr = alpha * makespan_var + sum(w * t for w, t in tardy_vars)
     model.Minimize(obj_expr)
+
+    _greedy_hint(model, payload, pending, combo_by_op, span=span,
+                 circuit_info=circuit_info, fam_of=fam_of,
+                 setup_lookup=setup_rows)
 
     solver = CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
