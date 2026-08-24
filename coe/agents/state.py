@@ -26,6 +26,9 @@ class RecoveryState(BaseModel):
     round_count: int = 0                      # shared §3.1 budget counter
     material_reactive: bool = False           # set by compile/solve back-edges
     strategy_final: bool = False              # §4.3 step 1 declaration
+    committed_version_id: int | None = None   # §7 final_status_version_id
+    material_reactive_passes: int = 0         # single intervention pass guard
+    solve_infeasible_material: bool = False   # set by solve node (back-edge 2)
     compiled_payload: dict | None = None
     solution: dict | None = None
     gate_result: dict | None = None
