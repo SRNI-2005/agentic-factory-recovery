@@ -70,3 +70,24 @@ def test_span_admits_three_transition_setup_stack():
     sol = solve(q)
     assert sol["status"] == "OPTIMAL"
     assert sol["makespan"] == 55
+
+
+def test_hint_avoids_frozen_occupancy():
+    """The greedy warm start must seed busy lists from frozen echoes, else
+    it hints live placements into already-executed time (here M1 [0,15))."""
+    p = _fx("frozen_respected")
+    from coe.solver.engine import _combos, _greedy_plan
+
+    pending = [(j, o) for j in p["jobs"]
+               for o in j["operations"] if o["status"] == "PENDING"]
+    frozen = [(j, o) for j in p["jobs"] for o in j["operations"]
+              if o["status"] != "PENDING" and o.get("frozen")]
+    combos = {o["operation_id"]: [
+        {"machine": m, "worker": w, "dur": d}
+        for m, w, d in _combos(o)] for _, o in pending}
+    placements, _ = _greedy_plan(p, pending, combos, frozen)
+    live = [h for h in placements if not h.get("is_frozen")]
+    assert live, "hint produced no live placements"
+    for h in live:
+        assert (h["machine_id"] != "M1"
+                or h["start"] >= 15), h

@@ -1,4 +1,5 @@
-"""Pure post-solve invariant checks (spec §6.2 gate list).
+"""Pure post-solve invariant checks (spec §6.2-adjacent gate list enforced
+at CLI commit (coe/cli.py::_solve_common); shared by Phase 3 gate/verifier).
 
 Shared verbatim by the Phase 2 committer and (later) Phase 3's pre-commit
 gate + post-commit verifier, so the definition can never drift apart.

@@ -69,6 +69,9 @@ def test_show_prints_active_schedule():
     r = cli("schedule", "show", "--instance", "factory_demo_01")
     assert r.returncode == 0, r.stderr
     assert "version=1" in r.stdout and "M0" in r.stdout
+    names = [ln.split()[0] for ln in r.stdout.splitlines()
+             if ln.startswith("  ")]
+    assert names == sorted(names)   # entries grouped by machine NAME
 
 
 def test_recovery_injects_through_ingest_and_commits():

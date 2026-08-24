@@ -127,20 +127,13 @@ def echo_assignment(job, op) -> dict:
     }
 
 
-def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
-                 circuit_info=None, fam_of=None, setup_lookup=None) -> None:
-    """DEVIATION (task-17, integration finding): the spec pins
-    num_search_workers=1 for determinism (spec §12 env table), but at demo
-    scale (168 ops x ~24 combos) the single-worker search behind the §6.6
-    AddCircuit setup layer found no feasible point within 240s (14-job slice:
-    131 solutions only after 120s), so baseline recovery never commits. This
-    warm-starts CP-SAT's hint-repair with a deterministic list schedule:
-    min-completion pointer dispatch (ties by job_id then sequence), setups and
-    machine downtime and worker unavailability respected, append-only per
-    machine so the hinted time order matches the hinted circuit order. Only
-    the material reservoir is left for repair (presolve proves it trivial on
-    this data). Purely a search aid: optimal set, seed and worker count are
-    untouched, so §6.13 determinism holds."""
+def _greedy_plan(payload, pending, combo_by_op, frozen_echo, *,
+                 fam_of=None, setup_lookup=None):
+    """Deterministic list schedule behind _greedy_hint: min-completion
+    pointer dispatch (ties by job_id then sequence), setups and machine
+    downtime and worker unavailability respected, append-only per machine
+    so the hinted time order matches the hinted circuit order. Returns
+    (live placements, per-machine hinted operation order)."""
     release_of: dict[str, int] = {}
     for j, _ in pending:
         release_of.setdefault(j["job_id"], j["release_time"])
@@ -159,6 +152,18 @@ def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
         u = uw["until"] if uw["until"] is not None else 10 ** 9
         if u > uw["from"]:
             _blocks(work_busy, uw["worker_id"], uw["from"], u)
+    # hardening C1: frozen echoes are historic fact — the machine (and any
+    # worker) stays occupied; the latest block on a machine seeds its setup
+    # state so setup-aware placement starts from reality.
+    last_frozen: dict[str, tuple[int, object]] = {}
+    for j, o in frozen_echo:
+        fz = o["frozen"]
+        _blocks(mach_busy, fz["machine_id"], fz["start"], fz["end"])
+        if fz.get("worker_id"):
+            _blocks(work_busy, fz["worker_id"], fz["start"], fz["end"])
+        prev = last_frozen.get(fz["machine_id"])
+        if prev is None or fz["end"] > prev[0]:
+            last_frozen[fz["machine_id"]] = (fz["end"], j.get("family_id"))
 
     def _fit(blocks_list, nb, d):
         t = nb
@@ -194,6 +199,10 @@ def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
     mach_order: dict[str, list[str]] = {}
     mach_last_end: dict[str, int] = {}
     mach_last_fam: dict[str, object] = dict(init_fam)
+    for mid, (_, fam) in last_frozen.items():
+        if fam is not None:
+            mach_last_fam[mid] = fam
+    placements: list[dict] = []
     while any(seqs for seqs in ops_by_job.values()):
         best = None
         for jid in sorted(ops_by_job):
@@ -228,17 +237,45 @@ def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
         _blocks(mach_busy, m, s - pre, e)
         if chosen["worker"]:
             _blocks(work_busy, chosen["worker"], s, e)
-        model.AddHint(chosen["lit"], 1)
-        for c in combo_by_op[oid_]:
-            if c is not chosen:
-                model.AddHint(c["lit"], 0)
-        model.AddHint(chosen["start"], min(s, span))
-        model.AddHint(chosen["end"], min(e, span))
+        placements.append({"operation_id": oid_, "job_id": jid,
+                           "machine_id": m, "worker_id": chosen["worker"],
+                           "start": s, "end": e})
         last_end[jid] = e
         mach_order.setdefault(m, []).append(oid_)
         mach_last_end[m] = e
         mach_last_fam[m] = fam_of.get(oid_)
         del ops_by_job[jid][seq]
+
+    return placements, mach_order
+
+
+def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
+                 circuit_info=None, fam_of=None, setup_lookup=None,
+                 frozen_echo=()) -> None:
+    """DEVIATION (task-17, integration finding): the spec pins
+    num_search_workers=1 for determinism (spec §9 Configuration), but at demo
+    scale (168 ops x ~24 combos) the single-worker search behind the §6.6
+    AddCircuit setup layer found no feasible point within 240s (14-job slice:
+    131 solutions only after 120s), so baseline recovery never commits. This
+    warm-starts CP-SAT's hint-repair with the deterministic list schedule
+    from _greedy_plan (frozen echoes occupy their resources). Only the
+    material reservoir is left for repair (presolve proves it trivial on
+    this data). Purely a search aid: optimal set, seed and worker count are
+    untouched, so the determinism contract (§11 Tier 4 / §12-9) holds."""
+    placements, mach_order = _greedy_plan(
+        payload, pending, combo_by_op, frozen_echo,
+        fam_of=fam_of, setup_lookup=setup_lookup)
+    for h in placements:
+        oid_ = h["operation_id"]
+        chosen = next(c for c in combo_by_op[oid_]
+                      if c["machine"] == h["machine_id"]
+                      and c["worker"] == h["worker_id"])
+        model.AddHint(chosen["lit"], 1)
+        for c in combo_by_op[oid_]:
+            if c is not chosen:
+                model.AddHint(c["lit"], 0)
+        model.AddHint(chosen["start"], min(h["start"], span))
+        model.AddHint(chosen["end"], min(h["end"], span))
 
     # ---- complete the hint over the §6.6 circuit literals ----
     for m in sorted(circuit_info or {}):
@@ -569,7 +606,7 @@ def solve(payload: dict) -> dict:
 
     _greedy_hint(model, payload, pending, combo_by_op, span=span,
                  circuit_info=circuit_info, fam_of=fam_of,
-                 setup_lookup=setup_rows)
+                 setup_lookup=setup_rows, frozen_echo=frozen_echo)
 
     solver = CpSolver()
     solver.parameters.max_time_in_seconds = time_limit

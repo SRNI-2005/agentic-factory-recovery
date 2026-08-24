@@ -168,7 +168,8 @@ def _run_show(args) -> None:
                .filter(Operation.instance_id == inst.id).all())
         opnames = {o.id: op_id(jname, o.sequence_number) for o, jname in ops}
         for e in sorted(entries.values(),
-                        key=lambda x: (x.machine_id, x.start_time)):
+                        key=lambda x: (mnames[x.machine_id],
+                                       x.start_time)):
             print(f"  {mnames[e.machine_id]:<6} "
                   f"W={wnames.get(e.worker_id, '-'):<6} "
                   f"{opnames[e.operation_id]:<10} "
