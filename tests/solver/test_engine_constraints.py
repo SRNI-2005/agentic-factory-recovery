@@ -189,3 +189,21 @@ def test_initial_setup_from_history():
 def test_missing_setup_row_means_zero():
     sol = solve(_fx("missing_setup_row"))
     assert _live_triples(sol) == [(0, 5, 0), (5, 10, 0)]
+
+
+# --- malformed windows must fail loudly --------------------------------------
+
+def test_malformed_downtime_window_rejected():
+    p = _fx("release_time")
+    p["machine_downtime"] = [{"machine_id": "M0", "from": 50,
+                              "until": 50, "reason": "X"}]
+    with pytest.raises(ValueError):
+        solve(p)
+
+
+def test_open_worker_window_rejected():
+    p = _fx("worker_unavailable")
+    p["worker_unavailability"] = [{"worker_id": "W1", "from": 0,
+                                   "until": None}]
+    with pytest.raises(ValueError):
+        solve(p)

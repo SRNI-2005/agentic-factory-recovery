@@ -26,6 +26,15 @@ def _validate_config(cfg: dict) -> None:
             "alpha>=0, beta>=0, alpha+beta>0 (spec §9)")
 
 
+def _require_valid_window(w_from: int, w_until, label: str) -> int:
+    if w_until is None:
+        raise ValueError(f"{label}: open-ended window cannot be a fixed block")
+    if w_until <= w_from:
+        raise ValueError(
+            f"{label}: malformed window [{w_from}, {w_until})")
+    return w_until - w_from
+
+
 def _combos(op: dict) -> list[tuple[str, str | None, int]]:
     """(machine, worker|None, duration) per eligible combination."""
     out = []
@@ -492,17 +501,20 @@ def solve(payload: dict) -> dict:
                     demands_by_sku.setdefault(mat["sku"], []).append(
                         (s, -int(mat["quantity"]), b_any))
 
-    # downtime + unavailability as fixed blocks
+    # downtime + unavailability as fixed blocks (malformed windows fail
+    # loudly: max(1, ...) silently mis-modeled `until <= from`)
     for wdw in payload["machine_downtime"]:
         until = wdw["until"] if wdw["until"] is not None else horizon
-        size = max(1, until - wdw["from"])
+        size = _require_valid_window(
+            wdw["from"], until, f"downtime/{wdw['machine_id']}")
         iv = model.NewIntervalVar(wdw["from"], size, until,
                                   f"dt_{wdw['machine_id']}_{wdw['from']}")
         machine_iv.setdefault(wdw["machine_id"], []).append(iv)
     for i, uw in enumerate(payload["worker_unavailability"]):
-        until = uw["until"] if uw["until"] is not None else horizon
-        iv = model.NewIntervalVar(uw["from"], max(1, until - uw["from"]),
-                                  until, f"uw_{uw['worker_id']}_{i}")
+        size = _require_valid_window(
+            uw["from"], uw["until"], f"unavailable/{uw['worker_id']}")
+        iv = model.NewIntervalVar(uw["from"], size, uw["until"],
+                                  f"uw_{uw['worker_id']}_{i}")
         worker_iv.setdefault(uw["worker_id"], []).append(iv)
 
     fam_of = {ob["operation_id"]: jb.get("family_id") for jb, ob in pending}

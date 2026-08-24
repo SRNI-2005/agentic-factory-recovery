@@ -85,6 +85,13 @@ def test_precedence_violation_detected():
     assert any("precedence" in v for v in msgs)
 
 
+def test_duration_arithmetic_violation_detected():
+    sol = _solution()
+    sol["assignments"][1]["end"] = 16          # J1-O2: start 10 + 5 + 0 != 16
+    msgs = check_solution(_payload(), sol)
+    assert any("duration arithmetic" in v for v in msgs)
+
+
 def test_blocked_operation_scheduled_detected():
     sol = _solution()
     sol["assignments"].append({

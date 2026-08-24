@@ -31,6 +31,14 @@ def check_solution(payload: dict, solution: dict) -> list[str]:
             violations.append(f"duplicate assignment for {oid_}")
             continue
         seen[oid_] = a
+        # Sixth gate (hardening 2026-08-24): duration arithmetic holds for
+        # every assignment; frozen echoes included (they carry setup 0).
+        # DEVIATION from brief listing: spec §5 pins setup_time as "setup
+        # duration before this operation", so [start, end) covers exactly
+        # the processing time — the setup lives in [start - setup, start)
+        # and must not enter the sum (it would reject every real schedule).
+        if a["end"] != a["start"] + a["processing_time"]:
+            violations.append(f"duration arithmetic violated on {oid_}")
         if oid_ in blocked:
             violations.append(f"blocked operation {oid_} appears in schedule")
         exp = frozen_expected.get(oid_)

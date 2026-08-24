@@ -35,7 +35,7 @@ def test_time_limit_respected_and_status_valid():
     p["config"]["time_limit_seconds"] = 0.001
     t0 = time.monotonic()
     sol = solve(p)
-    assert time.monotonic() - t0 < 5.0
+    assert time.monotonic() - t0 < 2.0
     assert sol["status"] in ("OPTIMAL", "FEASIBLE", "INFEASIBLE")
 
 
