@@ -37,7 +37,7 @@ def test_translate_validates_without_writing(demo):
     from sqlalchemy import text
 
     state = RecoveryState(instance_name="factory_demo_01",
-                          narrative=NARRATIVE)
+                          reference_clock=30, narrative=NARRATIVE)
     out = run_translate(state, client=FakeLLMClient([json.dumps(GOOD_MACHINE)]))
     assert out.disruption_record["kind"] == "MACHINE"
     engine = make_engine()
@@ -57,7 +57,7 @@ def test_ingest_node_writes_cli_hashed_event_idempotently(demo):
     from sqlalchemy import text
 
     base = RecoveryState(instance_name="factory_demo_01",
-                         narrative=NARRATIVE)
+                         reference_clock=30, narrative=NARRATIVE)
     st = run_translate(base,
                        client=FakeLLMClient([json.dumps(GOOD_MACHINE)]))
     run_ingest(st)
@@ -79,6 +79,7 @@ def test_invalid_then_valid_retries_with_feedback(demo):
     bad = dict(GOOD_MACHINE, occurred_at=-5)
     client = FakeLLMClient([json.dumps(bad), json.dumps(GOOD_MACHINE)])
     out = run_translate(RecoveryState(instance_name="factory_demo_01",
+                                      reference_clock=30,
                                       narrative=NARRATIVE), client=client,
                         max_retries=2)
     assert out.disruption_record["occurred_at"] == 512
@@ -97,7 +98,8 @@ def test_exhaustion_raises_translation_failed_no_db_mutation(demo):
                             json.dumps(bad)])   # 1 + max_retries(2)
     with pytest.raises(TranslationFailed):
         run_translate(RecoveryState(instance_name="factory_demo_01",
-                                    narrative=NARRATIVE), client=client,
+                                    reference_clock=30, narrative=NARRATIVE),
+                      client=client,
                       max_retries=2)
     engine = make_engine()
     with engine.begin() as c:
@@ -115,6 +117,7 @@ def test_multi_disruption_refusal_is_retryable(demo):
     two = [GOOD_MACHINE, dict(GOOD_MACHINE, worker_id="W3")]
     client = FakeLLMClient([json.dumps(two), json.dumps(GOOD_MACHINE)])
     out = run_translate(RecoveryState(instance_name="factory_demo_01",
+                                      reference_clock=30,
                                       narrative=NARRATIVE), client=client,
                         max_retries=2)
     assert out.disruption_record["kind"] == "MACHINE"

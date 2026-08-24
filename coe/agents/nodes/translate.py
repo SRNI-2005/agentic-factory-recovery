@@ -8,14 +8,6 @@ mutation. Ingestion is a SEPARATE graph node (run_ingest): it writes the
 validated record through the Phase 1 ingestion function under the wire
 message_id (MQTT) or a content-derived cli- id (CLI), so identical
 narratives are idempotent (§4.1 tail, criterion 13).
-
-Deviation from plan code (documented per repo convention): when neither
-an explicit clock nor instance telemetry exists yet (fresh scenario,
-CLI run without --at), run_translate falls back to minute 0 instead of
-the strict §10 loud failure — the prompt clock only anchors RELATIVE
-expressions and validated records carry absolute occurred_at values;
-once run_ingest writes the telemetry row, later nodes resolve a real
-clock normally.
 """
 import hashlib
 import json
@@ -121,16 +113,6 @@ def _instance_row(session, name):
     return row
 
 
-def _resolve_clock(session, instance_id: int, at: int | None) -> int:
-    """Explicit --at wins; else latest telemetry; else 0 (fresh scenario)."""
-    if at is not None:
-        return at
-    try:
-        return resolve_reference_clock(session, instance_id, None)
-    except ValueError:
-        return 0
-
-
 def run_translate(state: RecoveryState, *, client,
                   max_retries: int | None = None) -> RecoveryState:
     settings = get_settings()
@@ -138,7 +120,8 @@ def run_translate(state: RecoveryState, *, client,
                else max_retries)
     with Session(make_engine()) as session:
         inst_row = _instance_row(session, state.instance_name)
-        clock = _resolve_clock(session, inst_row.id, state.reference_clock)
+        clock = resolve_reference_clock(session, inst_row.id,
+                                        state.reference_clock)
         feedback = ""
         for attempt in range(1 + retries):
             system, user = build_translate_messages(
