@@ -347,7 +347,7 @@ Raw materials are *consumed*, not released when an operation finishes — so inv
 
 - **One reservoir per demanded SKU.** Events:
   - for each PENDING operation whose `materials` list carries the SKU: a consumption event at that operation's start variable with level change `−quantity`, activated by an any-combo boolean that is true iff the operation is scheduled at all (OR of its combo literals, linked with the same implication pattern as circuit node presence);
-  - for each receipt of the SKU arriving strictly before the horizon: a fixed refill event at `available_at` with change `+quantity`.
+  - for each receipt of that SKU — **all arrivals are emitted** *(Amendment 2026-08-24 third)*: a fixed refill event at `available_at` with change `+quantity`.
 - **Floor:** `−capacity`, where capacity comes from the payload's root `materials` row (initial stock at t = 0; arrivals act exclusively through their refill events). **Ceiling:** unconstrained-large (`Σ quantities + Σ refill quantities`).
 - **Semantics:** inventory-on-hand never drops below zero at any point, hence no operation starts unless its bars physically exist at its start time. The solver may freely delay an operation past a receipt to wait for stock. Instances whose total demand can never be covered come back `INFEASIBLE` — nothing is committed, and Phase 3 reacts (its 2026-08-24 amendment).
 - Blocked/frozen/completed operations contribute no events. Demanded SKUs missing from the root `materials` array get capacity 0 (normally unreachable because of pre-blocking).

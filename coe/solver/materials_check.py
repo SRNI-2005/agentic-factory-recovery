@@ -1,19 +1,22 @@
 """Pre-solve absolute-supply material gatekeeping (spec §7).
 
 Deliberately loose: allocation order is the solver's job. We catch only
-genuinely impossible shortages (zero total supply) and report partial
-shortfalls as advisory warnings for the Phase 3 agents.
+genuinely impossible shortages (zero stock AND zero receipts at any time)
+and report partial shortfalls as advisory warnings for the Phase 3 agents.
+
+Since Amendment 2026-08-24 (third), receipts count regardless of timing:
+a delivery at t=5000 legitimately enables a deferred operation, so it must
+not be treated as absent supply.
 """
 
 DEAD = "MATERIAL_UNAVAILABLE"
 SHORTFALL = "MATERIAL_SHORTFALL"
 
 
-def evaluate_materials(*, initial_stock, receipts, bom_by_op, horizon):
+def evaluate_materials(*, initial_stock, receipts, bom_by_op):
     supply = dict(initial_stock)
     for r in receipts:
-        if r["available_at"] < horizon:
-            supply[r["sku"]] = supply.get(r["sku"], 0) + r["quantity"]
+        supply[r["sku"]] = supply.get(r["sku"], 0) + r["quantity"]
 
     demand: dict[str, int] = {}
     for items in bom_by_op.values():

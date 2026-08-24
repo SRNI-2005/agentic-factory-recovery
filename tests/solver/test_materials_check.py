@@ -3,7 +3,7 @@ from coe.solver.materials_check import evaluate_materials
 
 def _run(stock, receipts, bom):
     return evaluate_materials(initial_stock=stock, receipts=receipts,
-                              bom_by_op=bom, horizon=1000)
+                              bom_by_op=bom)
 
 
 def test_zero_supply_blocks_ops():
@@ -17,18 +17,16 @@ def test_sufficient_supply_passes_silently():
     assert blocks == {} and warns == []
 
 
-def test_receipt_before_horizon_counts():
-    blocks, _ = _run({"STEEL": 0},
-                     [{"sku": "STEEL", "quantity": 10, "available_at": 500}],
-                     {"O1": [{"sku": "STEEL", "quantity": 2}]})
-    assert blocks == {}
-
-
-def test_receipt_at_or_after_horizon_ignored():
-    blocks, _ = _run({"STEEL": 0},
-                     [{"sku": "STEEL", "quantity": 10, "available_at": 1000}],
-                     {"O1": [{"sku": "STEEL", "quantity": 2}]})
-    assert blocks  # strictly-before rule
+def test_receipt_at_any_time_counts():
+    """Amendment 2026-08-24 (third): timing no longer gates supply — a
+    delivery at t=5000 enables a deferred operation, so it is never
+    'absent supply'."""
+    for available_at in (500, 1000, 5000):
+        blocks, _ = _run({"STEEL": 0},
+                         [{"sku": "STEEL", "quantity": 10,
+                           "available_at": available_at}],
+                         {"O1": [{"sku": "STEEL", "quantity": 2}]})
+        assert blocks == {}, available_at
 
 
 def test_partial_shortfall_warns_but_never_blocks():

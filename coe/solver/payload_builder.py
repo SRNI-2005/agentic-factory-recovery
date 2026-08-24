@@ -447,7 +447,6 @@ def build_payload(
                    "available_at": r.available_at}
                   for r, sku in receipt_rows],
         bom_by_op=bom_by_op,
-        horizon=horizon,
     )
     for entries in ops_by_job.values():
         for e in entries:
