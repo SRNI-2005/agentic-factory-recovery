@@ -262,6 +262,7 @@ Design principles:
 - Worker unavailability is pre-converted from positive availability windows by the payload builder.
 - Each alternative's `workers` map binds an eligible worker to their specific duration (`operation_machine_worker_times`, authoritative) *(Amendment 2026-08-23)*: the engine schedules the assigned worker's duration, so worker choice affects makespan and tardiness. An absent or empty map means no worker is required and the machine-level `processing_time` applies.
 - `materials` (root) lists every demanded SKU with its `capacity` = initial stock + receipts arriving strictly before the horizon *(Amendment 2026-08-24)*. `material_receipts` (root) lists those arrivals individually as `{sku, quantity, available_at}` — the engine's reservoir needs the timing, not just the total; arrivals at or after the horizon are omitted entirely (they can never help this solve). Per-operation `materials` lists carry `{sku, quantity}` from `operation_bom`; frozen, completed, and blocked operations carry empty/absent lists. The engine treats a demanded SKU missing from the root array as capacity 0 with no receipts (defensive; normally pre-blocked).
+- `failed_machines` (root, Amendment 2026-08-24 robustness): sorted names of EVERY machine excluded due to failure — CLI-named failures and status-derived strips alike — so the committer's `failed_machine_ids` audit column records the full truth even when stripping came from `machines.status` rather than the CLI. Baseline payloads emit `[]` unless status-truth stripping fired.
 - Blocked operations are excluded from solving and listed with a reason for downstream explainability.
 - Setup times use `from_family: null` for initial setup on a machine.
 - `machine_downtime` entries with `until: null` represent permanent failures. Note: Permanently failed machines are stripped from the `machines` array entirely, and their downtime entries must ALSO be omitted from `machine_downtime` to prevent the solver from throwing a KeyError when looking up the non-existent machine.
@@ -388,7 +389,7 @@ Phase 2 configuration extends Phase 1's `pydantic-settings` approach:
 - `SOLVER_RANDOM_SEED` (default: 42)
 - `SOLVER_NUM_SEARCH_WORKERS` (default: 1. Must be exactly 1 to guarantee deterministic solutions.)
 
-These are defaults. The `payload_builder` can override them per-run via CLI arguments or, in Phase 3, via agent-provided parameters.
+These are defaults. The `payload_builder` can override them per-run via CLI arguments or, in Phase 3, via agent-provided parameters. *(Robustness wiring, Amendment 2026-08-24: every knob is live — the builder seeds payload `config` from Settings for any value not explicitly overridden on the CLI, and the engine honors `random_seed`, `normalize_objectives`, and `num_search_workers` from that config; `num_search_workers ≠ 1` is permitted but breaks the determinism contract knowingly.)*
 **Constraint:** The payload builder must enforce `alpha >= 0`, `beta >= 0`, and `(alpha + beta) > 0`. Permitting negative weights would cause the solver to maximize time/tardiness. A zero-weight objective sum (`Minimize(0)`) causes the solver to legally return the very first feasible schedule it finds, which can produce highly irrational long-running schedules.
 
 ### 9.1 Weight Resolution Order *(Amendment 2026-08-23, second)*
