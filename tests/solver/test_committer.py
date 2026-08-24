@@ -1,5 +1,6 @@
 """Committer behavior against the real schema (mk01 pipeline, no workers)."""
 import pytest
+from sqlalchemy import create_engine
 
 from coe.solver.engine import solve
 from coe.solver.payload_builder import build_payload
@@ -205,3 +206,35 @@ def test_suspended_jobs_mirror_to_jobs_table(built_db):
         session.query(Job).filter(Job.instance_id == inst.id,
                                   Job.name == victim).update(
             {Job.status: original}, synchronize_session=False)
+
+
+def test_failed_ids_union_records_unstripped_names(built_db):
+    """A RECOVERY naming a machine that was NOT stripped still audits it."""
+    from coe.db.session import session_scope
+
+    from coe.solver.committer import commit_solution
+    from coe.solver.payload_builder import build_payload
+
+    with session_scope() as session:
+        inst = _inst(session, "factory_demo_01")
+        payload = build_payload(session, instance_row=inst,
+                                alpha=1.0, beta=1.0, time_limit_seconds=30,
+                                schedule_type="RECOVERY", now=1000)
+        assert "M6" not in payload["failed_machines"]
+        solution = {"status": "OPTIMAL", "objective_value": 1.0,
+                    "makespan": 1, "total_tardiness": 0,
+                    "assignments": [], "solve_duration_seconds": 0.0}
+        version = commit_solution(session, instance_row=inst,
+                                  payload=payload, solution=solution,
+                                  failed_machine_names=("M6",))
+        vid = version.id
+    from sqlalchemy import text
+
+    from coe.config import get_settings
+
+    eng = create_engine(get_settings().database_url)
+    with eng.begin() as c:
+        ids = c.execute(text(
+            "SELECT failed_machine_ids FROM schedule_versions "
+            "WHERE id = :v"), {"v": vid}).scalar_one()
+    assert ids == ["M6"]

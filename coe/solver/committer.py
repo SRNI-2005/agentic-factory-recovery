@@ -34,11 +34,8 @@ def commit_solution(session, *, instance_row, payload, solution,
     version_number = latest.version_number + 1 if latest else 1
 
     cfg = payload["config"]
-    failed_ids = None
-    if payload.get("failed_machines") is not None:
-        failed_ids = sorted(set(payload["failed_machines"])) or None
-    elif payload["schedule_type"] == "RECOVERY":
-        failed_ids = sorted(set(failed_machine_names)) or None
+    failed_ids = (sorted(set(payload.get("failed_machines") or ())
+                         | set(failed_machine_names)) or None)
 
     version = ScheduleVersion(
         instance_id=iid,
