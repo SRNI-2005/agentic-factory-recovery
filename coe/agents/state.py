@@ -25,6 +25,7 @@ class RecoveryState(BaseModel):
     round_verdicts: list[dict] = Field(default_factory=list)
     round_count: int = 0                      # shared §3.1 budget counter
     material_reactive: bool = False           # set by compile/solve back-edges
+    strategy_final: bool = False              # §4.3 step 1 declaration
     compiled_payload: dict | None = None
     solution: dict | None = None
     gate_result: dict | None = None
