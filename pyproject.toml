@@ -29,4 +29,5 @@ markers = [
     "db: tests requiring Dockerized TimescaleDB (docker compose up -d first)",
     "mqtt: tests also requiring Mosquitto reachable at MQTT_HOST/MQTT_PORT",
     "benchmark: Tier 1 MK01 optimality validation (spec §11)",
+    "slow: long-running integration pins excluded from the quick gate",
 ]

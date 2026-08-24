@@ -3,6 +3,17 @@
 No database access, no LLM calls, no side effects. Deterministic by contract:
 num_search_workers=1 plus insertion-ordered construction over the payload's
 ordered lists. Half-open time convention: [start, end).
+
+Hardening E: solve() runs two-phase relax-then-repair. Phase A solves the
+relaxation without the AddCircuit setup layer (proven instantly tractable);
+its solution is replayed onto the full phase-B model as a COMPLETE hint —
+chosen combo literals, s/e ints, makespan, tardy vars, and the circuit
+literals implied by phase A's per-machine order (complete hints prune
+search; partial hints make CP-SAT waste time completing them — cpsat-primer
+parameters chapter, or-stackexchange 10406). A starved phase A falls back to
+the deterministic _greedy_plan hint. Total wall usage ≈ time_limit plus a
+small phase-A overshoot tolerance; byte-determinism remains tied to OPTIMAL
+termination (cutoff-jitter caveat).
 """
 import time
 
@@ -122,6 +133,18 @@ def echo_assignment(job, op) -> dict:
     }
 
 
+def _split_ops(payload: dict) -> tuple[list, list]:
+    """(pending, frozen_echo) in payload iteration order."""
+    pending, frozen_echo = [], []
+    for job in payload["jobs"]:
+        for op in job["operations"]:
+            if op["status"] == "PENDING":
+                pending.append((job, op))
+            elif op.get("frozen") is not None:
+                frozen_echo.append((job, op))
+    return pending, frozen_echo
+
+
 def _greedy_plan(payload, pending, combo_by_op, frozen_echo, *,
                  fam_of=None, setup_lookup=None):
     """Deterministic list schedule behind _greedy_hint: min-completion
@@ -132,6 +155,15 @@ def _greedy_plan(payload, pending, combo_by_op, frozen_echo, *,
     release_of: dict[str, int] = {}
     for j, _ in pending:
         release_of.setdefault(j["job_id"], j["release_time"])
+
+    # hardening E fix: frozen anchors close their job's chain — a pending
+    # successor may not be hinted before its frozen predecessor's end (the
+    # model enforces s >= prev_end across frozen ops; ignoring it produced
+    # chain-violating warm starts on every RECOVERY payload).
+    last_end: dict[str, int] = {}
+    for j, o in frozen_echo:
+        jid_ = j["job_id"]
+        last_end[jid_] = max(last_end.get(jid_, 0), o["frozen"]["end"])
 
     mach_busy: dict[str, list[list[int]]] = {}
     work_busy: dict[str, list[list[int]]] = {}
@@ -190,7 +222,7 @@ def _greedy_plan(payload, pending, combo_by_op, frozen_echo, *,
     for j, o in pending:
         ops_by_job.setdefault(j["job_id"], {})[o["sequence"]] = o
 
-    last_end: dict[str, int] = {}
+    # last_end seeded from frozen echoes above (chain closure)
     mach_order: dict[str, list[str]] = {}
     mach_last_end: dict[str, int] = {}
     mach_last_fam: dict[str, object] = dict(init_fam)
@@ -244,6 +276,38 @@ def _greedy_plan(payload, pending, combo_by_op, frozen_echo, *,
     return placements, mach_order
 
 
+def _emit_hint(model, placements, mach_order, combo_by_op, *, span: int,
+               circuit_info=None) -> None:
+    """Emit a warm start from (placements, per-machine order): chosen combo
+    literals, s/e ints, then the §6.6 circuit literal completion."""
+    for h in placements:
+        oid_ = h["operation_id"]
+        chosen = next(c for c in combo_by_op[oid_]
+                      if c["machine"] == h["machine_id"]
+                      and c["worker"] == h["worker_id"])
+        model.AddHint(chosen["lit"], 1)
+        for c in combo_by_op[oid_]:
+            if c is not chosen:
+                model.AddHint(c["lit"], 0)
+        model.AddHint(chosen["start"], min(h["start"], span))
+        model.AddHint(chosen["end"], min(h["end"], span))
+
+    for m in sorted(circuit_info or {}):
+        ci = circuit_info[m]
+        order = [o for o in mach_order.get(m, []) if o in set(ci["oids"])]
+        pairs = set(zip(order, order[1:]))
+        oset = set(order)
+        model.AddHint(ci["idle"], 0 if order else 1)
+        for o in ci["oids"]:
+            model.AddHint(ci["on"][o], 1 if o in oset else 0)
+            model.AddHint(ci["first"][o],
+                          1 if order and o == order[0] else 0)
+            model.AddHint(ci["last"][o],
+                          1 if order and o == order[-1] else 0)
+        for (a, b), lit in ci["arcs"].items():
+            model.AddHint(lit, 1 if (a, b) in pairs else 0)
+
+
 def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
                  circuit_info=None, fam_of=None, setup_lookup=None,
                  frozen_echo=()) -> None:
@@ -260,33 +324,8 @@ def _greedy_hint(model, payload, pending, combo_by_op, *, span: int,
     placements, mach_order = _greedy_plan(
         payload, pending, combo_by_op, frozen_echo,
         fam_of=fam_of, setup_lookup=setup_lookup)
-    for h in placements:
-        oid_ = h["operation_id"]
-        chosen = next(c for c in combo_by_op[oid_]
-                      if c["machine"] == h["machine_id"]
-                      and c["worker"] == h["worker_id"])
-        model.AddHint(chosen["lit"], 1)
-        for c in combo_by_op[oid_]:
-            if c is not chosen:
-                model.AddHint(c["lit"], 0)
-        model.AddHint(chosen["start"], min(h["start"], span))
-        model.AddHint(chosen["end"], min(h["end"], span))
-
-    # ---- complete the hint over the §6.6 circuit literals ----
-    for m in sorted(circuit_info or {}):
-        ci = circuit_info[m]
-        order = [o for o in mach_order.get(m, []) if o in set(ci["oids"])]
-        pairs = set(zip(order, order[1:]))
-        oset = set(order)
-        model.AddHint(ci["idle"], 0 if order else 1)
-        for o in ci["oids"]:
-            model.AddHint(ci["on"][o], 1 if o in oset else 0)
-            model.AddHint(ci["first"][o],
-                          1 if order and o == order[0] else 0)
-            model.AddHint(ci["last"][o],
-                          1 if order and o == order[-1] else 0)
-        for (a, b), lit in ci["arcs"].items():
-            model.AddHint(lit, 1 if (a, b) in pairs else 0)
+    _emit_hint(model, placements, mach_order, combo_by_op, span=span,
+               circuit_info=circuit_info)
 
 
 
@@ -400,55 +439,14 @@ def _add_setups(model, *, payload, pending, combo_by_op, machine_iv, fam_of):
     return setup_choices, circuit_info, lookup
 
 
-def solve(payload: dict) -> dict:
-    t0 = time.monotonic()
-    cfg = payload["config"]
-    _validate_config(cfg)
-    alpha = float(cfg["alpha"])
-    normalize = bool(cfg.get("normalize_objectives", True))
-    time_limit = float(cfg.get("time_limit_seconds", 60))
-    seed = int(cfg.get("random_seed", 42))
-
-    pending, frozen_echo = [], []
-    for job in payload["jobs"]:
-        for op in job["operations"]:
-            if op["status"] == "PENDING":
-                pending.append((job, op))
-            elif op.get("frozen") is not None:
-                frozen_echo.append((job, op))
-
-    def terms_for(ends_by_job: dict[str, int]) -> list[tuple[float, int]]:
-        out = []
-        for job in payload["jobs"]:
-            dl = job["deadline"]
-            if dl is None or job["job_id"] not in ends_by_job:
-                continue
-            out.append((_effective_beta(payload, job["job_id"]),
-                        max(0, ends_by_job[job["job_id"]] - dl)))
-        return out
-
-    def finish(status, assignments, makespan, terms, horizon_used, dur=None):
-        total = round(sum(t for _, t in terms))
-        if normalize and horizon_used > 0:
-            obj = alpha * makespan / horizon_used + sum(
-                w * t / horizon_used for w, t in terms)
-        else:
-            obj = alpha * makespan + sum(w * t for w, t in terms)
-        return {"status": status,
-                "objective_value": round(float(obj), 9),
-                "makespan": int(makespan),
-                "total_tardiness": total,
-                "assignments": assignments,
-                "solve_duration_seconds": dur if dur is not None
-                else round(time.monotonic() - t0, 6)}
-
-    # ---- short circuit: nothing pending ----
-    if not pending:
-        ends_by_job = {j["job_id"]: o["frozen"]["end"] for j, o in frozen_echo}
-        mk = max(ends_by_job.values(), default=0)
-        return finish("OPTIMAL",
-                      [echo_assignment(j, o) for j, o in frozen_echo],
-                      mk, terms_for(ends_by_job), max(mk, 1))
+def _build_model(payload: dict, *, include_setups: bool) -> dict:
+    """Single construction site for both phases (hardening E): variable
+    creation ORDER is identical for both include_setups values up to the
+    setups block — include_setups=False skips exactly the one _add_setups
+    call site, so phase A's model is a construction-prefix of phase B's
+    (hint mapping rides captured VALUES; ordering is belt-and-braces).
+    Returns the context solve() needs for hinting/extraction."""
+    pending, frozen_echo = _split_ops(payload)
 
     horizon = compute_horizon(
         jobs=payload["jobs"],
@@ -550,10 +548,14 @@ def solve(payload: dict) -> dict:
         worker_iv.setdefault(uw["worker_id"], []).append(iv)
 
     fam_of = {ob["operation_id"]: jb.get("family_id") for jb, ob in pending}
-    setup_choices, circuit_info, setup_rows = _add_setups(
-        model, payload=payload, pending=pending,
-        combo_by_op=combo_by_op,
-        machine_iv=machine_iv, fam_of=fam_of)
+    setup_choices: dict[str, list[tuple[object, int]]] = {}
+    circuit_info: dict[str, dict] = {}
+    setup_rows: dict[tuple[str, str | None, str], int] = {}
+    if include_setups:
+        setup_choices, circuit_info, setup_rows = _add_setups(
+            model, payload=payload, pending=pending,
+            combo_by_op=combo_by_op,
+            machine_iv=machine_iv, fam_of=fam_of)
 
     for ivs in machine_iv.values():
         if len(ivs) > 1:
@@ -586,7 +588,8 @@ def solve(payload: dict) -> dict:
             continue
         t = model.NewIntVar(0, span, f"t_{job['job_id']}")
         model.AddMaxEquality(t, [0, end_expr - job["deadline"]])
-        tardy_vars.append((_effective_beta(payload, job["job_id"]), t))
+        tardy_vars.append((job["job_id"],
+                           _effective_beta(payload, job["job_id"]), t))
 
     all_ends = [prev_end[j] for j in ops_in_job if j in prev_end]
     makespan_var = model.NewIntVar(0, span, "makespan")
@@ -595,17 +598,145 @@ def solve(payload: dict) -> dict:
     # DEVIATION (task-14): ortools forbids division on linear expressions,
     # so the model minimizes the unscaled weighted sum; normalization (§9)
     # divides by horizon > 0, a positive scale that preserves the argmin,
-    # while finish() reports the normalized ratio.
-    obj_expr = alpha * makespan_var + sum(w * t for w, t in tardy_vars)
+    # while finish() reports the normalized ratio. Both phases minimize the
+    # same expression so phase A's argmin seeds phase B's search.
+    obj_expr = (float(payload["config"]["alpha"]) * makespan_var
+                + sum(w * t for _, w, t in tardy_vars))
     model.Minimize(obj_expr)
 
-    _greedy_hint(model, payload, pending, combo_by_op, span=span,
-                 circuit_info=circuit_info, fam_of=fam_of,
-                 setup_lookup=setup_rows, frozen_echo=frozen_echo)
+    return {"model": model, "horizon": horizon, "span": span,
+            "combo_by_op": combo_by_op, "machine_iv": machine_iv,
+            "worker_iv": worker_iv, "setup_choices": setup_choices,
+            "circuit_info": circuit_info, "setup_rows": setup_rows,
+            "tardy_vars": tardy_vars, "makespan_var": makespan_var,
+            "prev_end": prev_end, "pending": pending,
+            "frozen_echo": frozen_echo}
+
+
+def _hint_from_solution(model, payload, ctx_a: dict, ctx_b: dict,
+                        solver_a) -> None:
+    """Relax-then-repair warm start (hardening E): phase A chooses each
+    pending op's (machine, worker) combo on the setup-free relaxation; the
+    timing is then re-derived by the deterministic setup-aware list
+    dispatch (_greedy_plan restricted to A's choices), so the replayed hint
+    is not only COMPLETE over every decision variable family — chosen combo
+    literals, s/e ints, §6.6 circuit literals, makespan and ALL tardy vars —
+    but also FEASIBLE for the full model. That pairing is the validated
+    behavior (cpsat-primer parameters chapter; or-stackexchange 10406:
+    complete+feasible hints are tagged [hint] immediately, partial ones get
+    repaired expensively). DEVIATION from the raw design sketch (documented
+    in the task report): hinting A's raw s/e values directly made the hint
+    mass-violate setup intervals — measured on factory_demo_01 baseline,
+    phase B burned its whole budget in hint repair and returned UNKNOWN
+    where the feasible-hint variant commits at once. Deliberately NOT
+    pinned via fix_variables_to_their_hinted_value."""
+    pending = ctx_b["pending"]
+    filtered: dict[str, list[dict]] = {}
+    for _, op in ctx_a["pending"]:
+        oid_ = op["operation_id"]
+        ca = next(c for c in ctx_a["combo_by_op"][oid_]
+                  if solver_a.BooleanValue(c["lit"]))
+        cb = next(c for c in ctx_b["combo_by_op"][oid_]
+                  if (c["machine"], c["worker"])
+                  == (ca["machine"], ca["worker"]))
+        filtered[oid_] = [cb]
+
+    fam_of = {ob["operation_id"]: jb.get("family_id") for jb, ob in pending}
+    placements, mach_order = _greedy_plan(
+        payload, pending, filtered, ctx_b["frozen_echo"],
+        fam_of=fam_of, setup_lookup=ctx_b["setup_rows"])
+    _emit_hint(model, placements, mach_order, ctx_b["combo_by_op"],
+               span=ctx_b["span"], circuit_info=ctx_b["circuit_info"])
+
+    # makespan + tardy hints consistent with the re-timed placements
+    span = ctx_b["span"]
+    ends: dict[str, int] = {}
+    for h in placements:
+        ends[h["job_id"]] = max(ends.get(h["job_id"], 0), h["end"])
+    frozen_end = max((o["frozen"]["end"] for _, o in ctx_b["frozen_echo"]),
+                     default=0)
+    deadline_of = {j["job_id"]: j["deadline"] for j in payload["jobs"]}
+    tardy_b = {jid: tv for jid, _, tv in ctx_b["tardy_vars"]}
+    for jid, tv in tardy_b.items():
+        model.AddHint(tv, min(max(0, ends.get(jid, 0) - deadline_of[jid]),
+                              span))
+    model.AddHint(ctx_b["makespan_var"],
+                  min(max([*(ends.values() or [0]), frozen_end]), span))
+
+
+def solve(payload: dict) -> dict:
+    t0 = time.monotonic()
+    cfg = payload["config"]
+    _validate_config(cfg)
+    alpha = float(cfg["alpha"])
+    normalize = bool(cfg.get("normalize_objectives", True))
+    time_limit = float(cfg.get("time_limit_seconds", 60))
+    seed = int(cfg.get("random_seed", 42))
+    workers = int(cfg.get("num_search_workers", 1))
+
+    def terms_for(ends_by_job: dict[str, int]) -> list[tuple[float, int]]:
+        out = []
+        for job in payload["jobs"]:
+            dl = job["deadline"]
+            if dl is None or job["job_id"] not in ends_by_job:
+                continue
+            out.append((_effective_beta(payload, job["job_id"]),
+                        max(0, ends_by_job[job["job_id"]] - dl)))
+        return out
+
+    def finish(status, assignments, makespan, terms, horizon_used, dur=None):
+        total = round(sum(t for _, t in terms))
+        if normalize and horizon_used > 0:
+            obj = alpha * makespan / horizon_used + sum(
+                w * t / horizon_used for w, t in terms)
+        else:
+            obj = alpha * makespan + sum(w * t for w, t in terms)
+        return {"status": status,
+                "objective_value": round(float(obj), 9),
+                "makespan": int(makespan),
+                "total_tardiness": total,
+                "assignments": assignments,
+                "solve_duration_seconds": dur if dur is not None
+                else round(time.monotonic() - t0, 6)}
+
+    pending, frozen_echo = _split_ops(payload)
+
+    # ---- short circuit: nothing pending ----
+    if not pending:
+        ends_by_job = {j["job_id"]: o["frozen"]["end"] for j, o in frozen_echo}
+        mk = max(ends_by_job.values(), default=0)
+        return finish("OPTIMAL",
+                      [echo_assignment(j, o) for j, o in frozen_echo],
+                      mk, terms_for(ends_by_job), max(mk, 1))
+
+    # ---- phase A: relaxation without the AddCircuit setup layer ----
+    ctx_a = _build_model(payload, include_setups=False)
+    solver_a = CpSolver()
+    solver_a.parameters.max_time_in_seconds = min(
+        10.0, max(2.0, 0.2 * time_limit))
+    solver_a.parameters.num_search_workers = workers
+    solver_a.parameters.random_seed = seed
+    ta0 = time.monotonic()
+    status_a = solver_a.Solve(ctx_a["model"])
+    a_elapsed = round(time.monotonic() - ta0, 6)
+
+    # ---- phase B: full model, warm-started from A or greedy fallback ----
+    ctx_b = _build_model(payload, include_setups=True)
+    model = ctx_b["model"]
+    if status_a in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        _hint_from_solution(model, payload, ctx_a, ctx_b, solver_a)
+    else:
+        fam_of = {ob["operation_id"]: jb.get("family_id")
+                  for jb, ob in pending}
+        _greedy_hint(model, payload, pending, ctx_b["combo_by_op"],
+                     span=ctx_b["span"],
+                     circuit_info=ctx_b["circuit_info"], fam_of=fam_of,
+                     setup_lookup=ctx_b["setup_rows"],
+                     frozen_echo=frozen_echo)
 
     solver = CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit
-    solver.parameters.num_search_workers = int(cfg.get("num_search_workers", 1))
+    solver.parameters.max_time_in_seconds = max(5.0, time_limit - a_elapsed)
+    solver.parameters.num_search_workers = workers
     solver.parameters.random_seed = seed
     status_code = solver.Solve(model)
     duration = round(time.monotonic() - t0, 6)
@@ -629,18 +760,18 @@ def solve(payload: dict) -> dict:
         return finish(label, assignments, mk,
                       terms_for({j["job_id"]: o["frozen"]["end"]
                                  for j, o in frozen_echo}),
-                      horizon, dur=duration)
+                      ctx_b["horizon"], dur=duration)
 
     assignments = [echo_assignment(j, o) for j, o in frozen_echo]
     ends_solved: dict[str, int] = {}
     for j, o in pending:
         oid_ = o["operation_id"]
-        chosen = next(c for c in combo_by_op[oid_]
+        chosen = next(c for c in ctx_b["combo_by_op"][oid_]
                       if solver.BooleanValue(c["lit"]))
         st = int(solver.Value(chosen["start"]))
         en = int(solver.Value(chosen["end"]))
         setup_used = sum(
-            d for lit, d in setup_choices.get(oid_, [])
+            d for lit, d in ctx_b["setup_choices"].get(oid_, [])
             if solver.BooleanValue(lit))
         assignments.append({
             "operation_id": oid_,
@@ -658,4 +789,4 @@ def solve(payload: dict) -> dict:
     merged = {j["job_id"]: o["frozen"]["end"] for j, o in frozen_echo}
     merged.update(ends_solved)
     return finish(label, assignments, max(a["end"] for a in assignments),
-                  terms_for(merged), horizon, dur=duration)
+                  terms_for(merged), ctx_b["horizon"], dur=duration)

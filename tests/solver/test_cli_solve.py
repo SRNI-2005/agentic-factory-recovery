@@ -128,6 +128,16 @@ def test_restore_closes_window_and_activates():
     assert until is not None and status == "ACTIVE"
 
 
+def test_recovery_budget_floor_unit():
+    """Option A: recovery quality floor — spec §10. Pure helper; baseline
+    path untouched."""
+    from coe.cli import _recovery_floor
+
+    assert _recovery_floor(60) == 180
+    assert _recovery_floor(300) == 300
+    assert _recovery_floor(180) == 180
+
+
 def test_rollback_chain_then_floor():
     r = cli("schedule", "rollback", "--instance", "factory_demo_01")
     assert r.returncode == 0, r.stderr

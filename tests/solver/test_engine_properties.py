@@ -35,7 +35,10 @@ def test_time_limit_respected_and_status_valid():
     p["config"]["time_limit_seconds"] = 0.001
     t0 = time.monotonic()
     sol = solve(p)
-    assert time.monotonic() - t0 < 2.0
+    # DEVIATION (hardening E): two-phase budgets carry floors (phase A
+    # max(2.0, ...), phase B max(5.0, ...)), so a 1ms request legitimately
+    # costs ~7s wall; bound widened from the pre-two-phase <2.0s pin.
+    assert time.monotonic() - t0 < 10.0
     assert sol["status"] in ("OPTIMAL", "FEASIBLE", "INFEASIBLE")
 
 
@@ -91,6 +94,35 @@ def test_hint_avoids_frozen_occupancy():
     for h in live:
         assert (h["machine_id"] != "M1"
                 or h["start"] >= 15), h
+
+
+def test_relax_phase_feeds_full_model_on_hard_fixture():
+    """Behavioral pin (hardening E): the relax-then-repair pipeline stays
+    correct end-to-end on a fixture whose phase-A relaxation differs from
+    the full model (setups change the optimal order)."""
+    q = _fx("setup_enforced")
+    sol = solve(q)
+    assert sol["status"] == "OPTIMAL" and sol["makespan"] == 12
+
+
+def test_unknown_still_honest_when_both_phases_starve(monkeypatch):
+    """Both phases starve: starved phase A falls back to the greedy hint,
+    then phase B starves too and UNKNOWN passes through honestly."""
+    from ortools.sat.python import cp_model as cm
+
+    from coe.solver import engine
+
+    class FakeSolver:
+        class parameters:
+            pass
+
+        def Solve(self, model):
+            return cm.UNKNOWN
+
+    monkeypatch.setattr(engine, "CpSolver", FakeSolver)
+    r = solve(_fx("worker_no_overlap"))
+    assert r["status"] == "UNKNOWN"
+    assert [x for x in r["assignments"] if not x["is_frozen"]] == []
 
 
 def test_normalized_short_circuit_and_weights():

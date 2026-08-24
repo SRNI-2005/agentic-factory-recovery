@@ -76,6 +76,11 @@ def _solve_common(session, inst, payload, *, now=None,
           f"duration={version.solve_duration_seconds}s")
 
 
+def _recovery_floor(seconds: float) -> float:
+    """Option A: recovery quality floor — spec §10"""
+    return max(seconds, 180)
+
+
 def _run_solve(args) -> None:
     from coe.db.session import session_scope
 
@@ -93,6 +98,7 @@ def _run_solve(args) -> None:
         return
 
     # recovery
+    w["time_limit_seconds"] = _recovery_floor(w["time_limit_seconds"])
     with session_scope() as session:
         inst = _instance_or_die(session, args.instance)
         now = resolve_reference_clock(session, inst.id, args.at)
