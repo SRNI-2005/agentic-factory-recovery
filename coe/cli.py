@@ -8,6 +8,10 @@ def _weight_args(p):
     p.add_argument("--beta", type=float, default=None)
     p.add_argument("--time-limit", type=int, default=None,
                    dest="time_limit")
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--workers", type=int, default=None)
+    p.add_argument("--no-normalize", action="store_true",
+                   dest="no_normalize")
 
 
 def _weight_overrides(args) -> dict:
@@ -20,6 +24,12 @@ def _weight_overrides(args) -> dict:
         "beta": args.beta if args.beta is not None else s.solver_beta_weight,
         "time_limit_seconds": args.time_limit if args.time_limit is not None
         else s.solver_time_limit_seconds,
+        "random_seed": args.seed if args.seed is not None
+        else s.solver_random_seed,
+        "num_search_workers": args.workers if args.workers is not None
+        else s.solver_num_search_workers,
+        "normalize_objectives": False if args.no_normalize
+        else s.solver_normalize_objectives,
     }
 
 

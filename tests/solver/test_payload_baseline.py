@@ -49,7 +49,9 @@ def test_factory_baseline_shape(demo_session):
     assert p["warnings"] == []
     assert p["blocked_operations"] == []      # stock = 1.2x demand at build
     assert p["config"] == {"alpha": 1.0, "beta": 1.0, "time_limit_seconds": 60,
-                           "normalize_objectives": True}
+                           "normalize_objectives": True,
+                           "random_seed": 42, "num_search_workers": 1}
+    assert p["failed_machines"] == []
 
 
 def test_every_alternative_carries_worker_map(demo_session):
@@ -137,6 +139,18 @@ def test_baseline_deterministic_bytes(demo_session):
     b = build_payload(session, instance_row=inst, alpha=1.0, beta=1.0,
                       time_limit_seconds=60)
     assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def test_config_carries_resolved_knobs(demo_session):
+    session, inst = demo_session
+    from coe.solver.payload_builder import build_payload
+
+    p = build_payload(session, instance_row=inst, alpha=1.0, beta=1.0,
+                      time_limit_seconds=60, random_seed=7,
+                      num_search_workers=1, normalize_objectives=False)
+    assert p["config"]["random_seed"] == 7
+    assert p["config"]["num_search_workers"] == 1
+    assert p["config"]["normalize_objectives"] is False
 
 
 # ---------- baseline payload on pure MK01 (DB) ----------

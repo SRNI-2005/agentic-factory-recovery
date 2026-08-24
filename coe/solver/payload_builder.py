@@ -28,6 +28,7 @@ from coe.db.models.workers import (
     Worker,
     WorkerAvailabilityWindow,
 )
+from coe.config import get_settings
 from coe.solver.horizon import compute_horizon
 from coe.solver.identifier import op_id
 from coe.solver.materials_check import evaluate_materials
@@ -113,12 +114,24 @@ def build_payload(
     alpha: float,
     beta: float,
     time_limit_seconds: int,
-    normalize_objectives: bool = True,
+    random_seed: int | None = None,
+    num_search_workers: int | None = None,
+    normalize_objectives: bool | None = None,
     schedule_type: str = "BASELINE",
     now: int | None = None,                       # Part 3 seam — unused here
     failed_machine_names: tuple[str, ...] = (),   # Part 3 seam — unused here
 ):
     iid = instance_row.id
+
+    # SOLVER_* knobs (final-review Minor 4): param -> Settings -> spec default.
+    # Names deliberately distinct from the per-alternative loop locals below.
+    _s = get_settings()
+    cfg_seed = _s.solver_random_seed if random_seed is None else random_seed
+    cfg_workers = (_s.solver_num_search_workers if num_search_workers is None
+                   else num_search_workers)
+    cfg_normalize = (_s.solver_normalize_objectives
+                     if normalize_objectives is None
+                     else normalize_objectives)
 
     machines = (
         session.query(Machine)
@@ -525,8 +538,11 @@ def build_payload(
         "parent_version_id": parent_version_id,
         "config": {"alpha": alpha, "beta": beta,
                    "time_limit_seconds": time_limit_seconds,
-                   "normalize_objectives": normalize_objectives},
+                   "normalize_objectives": cfg_normalize,
+                   "random_seed": cfg_seed,
+                   "num_search_workers": cfg_workers},
         "machines": machine_names,
+        "failed_machines": sorted(stripped),
         "machine_initial_families": machine_initial_families,
         "warnings": warnings,
         "jobs": payload_jobs,

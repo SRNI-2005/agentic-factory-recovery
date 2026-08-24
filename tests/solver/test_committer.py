@@ -152,6 +152,27 @@ def test_rollback_chain_and_floor(built_db, solved_mk01):
             rollback_active(session, inst)
 
 
+def test_failed_machines_root_key_recorded_on_baseline(built_db):
+    """Minor 5: payload root failed_machines is the audit truth — a
+    status-stripped BASELINE records the stripped set, not just RECOVERY."""
+    from coe.db.session import session_scope
+
+    from coe.solver.committer import commit_solution
+    from coe.solver.payload_builder import build_payload
+
+    with session_scope() as session:
+        inst = _inst(session, "factory_demo_01")
+        payload = build_payload(session, instance_row=inst,
+                                alpha=1.0, beta=1.0, time_limit_seconds=30)
+        payload["failed_machines"] = ["M2", "M3"]
+        solution = {"status": "OPTIMAL", "objective_value": 1.0,
+                    "makespan": 1, "total_tardiness": 0,
+                    "assignments": [], "solve_duration_seconds": 0.0}
+        version = commit_solution(session, instance_row=inst,
+                                  payload=payload, solution=solution)
+        assert version.failed_machine_ids == ["M2", "M3"]
+
+
 def test_suspended_jobs_mirror_to_jobs_table(built_db):
     from coe.db.models.fjsp import Job
     from coe.db.session import session_scope

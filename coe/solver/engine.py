@@ -561,7 +561,7 @@ def solve(payload: dict) -> dict:
 
     solver = CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
-    solver.parameters.num_search_workers = 1
+    solver.parameters.num_search_workers = int(cfg.get("num_search_workers", 1))
     solver.parameters.random_seed = seed
     status_code = solver.Solve(model)
     duration = round(time.monotonic() - t0, 6)

@@ -103,6 +103,7 @@ def test_failed_status_machine_stripped_in_baseline(demo_session):
     session.flush()
     p = _build(session, inst)
     assert "M3" not in p["machines"]
+    assert p["failed_machines"] == ["M3"]
     assert all(d["machine_id"] != "M3" for d in p["machine_downtime"])
     assert all(alt["machine_id"] != "M3"
                for j in p["jobs"] for op in j["operations"]
