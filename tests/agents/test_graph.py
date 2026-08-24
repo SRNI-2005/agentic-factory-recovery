@@ -150,3 +150,38 @@ def test_routers_are_pure_functions():
     done = RecoveryState(**base, solve_infeasible_material=False)
     assert route_after_solve(infeas) == "strategy"         # back-edge 2
     assert route_after_solve(done) == "END"
+
+
+def test_terminal_status_labels_verifier_rollback():
+    """Fix round 1: terminal labeling keys off verify ``passed`` (not
+    rolled_back_from), so verify_commit's no-committed-version degenerate
+    (passed=False, rolled_back_from=None) is VERIFIER_ROLLBACK, and the
+    SOLVE_INFEASIBLE > GATE_FAILED > VERIFIER_ROLLBACK > COMMITTED order
+    is pinned."""
+    from coe.agents.graph import _terminal_status
+    from coe.agents.state import RecoveryState
+
+    base = {"instance_name": "x", "solution": {"status": "OPTIMAL"},
+            "gate_result": {"passed": True}}
+    committed = RecoveryState(
+        **base,
+        verify_result={"passed": True, "violations": [],
+                       "version_number": 7, "rolled_back_from": 7})
+    assert _terminal_status(committed) == "COMMITTED"
+    no_version = RecoveryState(
+        **base,
+        verify_result={"passed": False,
+                       "violations": ["no committed version found"],
+                       "version_number": None, "rolled_back_from": None})
+    assert _terminal_status(no_version) == "VERIFIER_ROLLBACK"
+    violated = RecoveryState(
+        **base,
+        verify_result={"passed": False, "violations": ["op overlap"],
+                       "version_number": 7, "rolled_back_from": 6})
+    assert _terminal_status(violated) == "VERIFIER_ROLLBACK"
+    assert _terminal_status(
+        RecoveryState(**{**base, "gate_result": {"passed": False}},
+                      verify_result=None)) == "GATE_FAILED"
+    assert _terminal_status(
+        RecoveryState(**{**base, "solution": {"status": "INFEASIBLE"}})
+    ) == "SOLVE_INFEASIBLE"

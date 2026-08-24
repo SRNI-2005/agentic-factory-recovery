@@ -211,6 +211,20 @@ def route_after_verify(state: RecoveryState) -> str:
     return "END"                                 # VERIFIER_ROLLBACK
 
 
+def _terminal_status(state: RecoveryState) -> str:
+    """Terminal run-status decision order (§3.3): SOLVE_INFEASIBLE →
+    GATE_FAILED → VERIFIER_ROLLBACK → COMMITTED. Pure; unit-testable.
+    VERIFIER_ROLLBACK keys off ``passed`` so it covers both the violation
+    case and verify_commit's no-committed-version degenerate."""
+    if (state.solution or {}).get("status") in ("INFEASIBLE", "UNKNOWN"):
+        return "SOLVE_INFEASIBLE"        # UNKNOWN mapped; see report notes
+    if not (state.gate_result or {}).get("passed"):
+        return "GATE_FAILED"
+    if not (state.verify_result or {}).get("passed", True):
+        return "VERIFIER_ROLLBACK"
+    return "COMMITTED"
+
+
 def execute_recovery(instance_name: str, *, trigger: str,
                      narrative: str | None = None,
                      record: dict | None = None,
@@ -247,14 +261,10 @@ def execute_recovery(instance_name: str, *, trigger: str,
         status = "TRANSLATION_FAILED"
         record_json = {"narrative": exc.narrative,
                        "validation_error": exc.error}
+        if source_message_id is not None:
+            record_json["message_id"] = source_message_id   # §3.4 dedup key
     else:
-        sol_status = (final_state.solution or {}).get("status")
-        if sol_status in ("INFEASIBLE", "UNKNOWN"):
-            status = "SOLVE_INFEASIBLE"     # UNKNOWN mapped; see report notes
-        elif not (final_state.gate_result or {}).get("passed"):
-            status = "GATE_FAILED"
-        elif (final_state.verify_result or {}).get("rolled_back_from"):
-            status = "VERIFIER_ROLLBACK"
+        status = _terminal_status(final_state)
 
         rec = final_state.disruption_record or {}
         record_json = dict(rec)
