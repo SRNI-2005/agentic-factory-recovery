@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     solver_random_seed: int = 42
     solver_num_search_workers: int = 8
 
+    # --- Phase 3 (spec §9) ---
+    llm_provider: str | None = None       # no default: fail fast if unset
+    llm_model: str | None = None          # no default: fail fast if unset
+    llm_temperature: float = 0.0          # reproducibility
+    strategy_max_rounds: int = 3
+    llm_max_retries: int = 2
+    benchmark_translation_accuracy: float = 0.90
+    recovery_lock_wait_seconds: int = 600
+
 
 @lru_cache
 def get_settings() -> Settings:
