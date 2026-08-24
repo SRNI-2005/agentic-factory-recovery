@@ -1,0 +1,28 @@
+{
+  "instance_id": "fx",
+  "schedule_type": "RECOVERY",
+  "parent_version_id": 7,
+  "config": {"alpha": 1.0, "beta": 1.0, "time_limit_seconds": 60,
+             "normalize_objectives": false},
+  "machines": ["M1"],
+  "machine_initial_families": {},
+  "warnings": [],
+  "jobs": [
+    {"job_id": "J1", "family_id": null, "release_time": 0, "deadline": null,
+     "priority": 1,
+     "operations": [
+       {"operation_id": "J1-O1", "sequence": 1, "status": "COMPLETED",
+        "alternatives": [],
+        "frozen": {"machine_id": "M1", "worker_id": null, "start": 0,
+                   "end": 15}},
+       {"operation_id": "J1-O2", "sequence": 2, "status": "PENDING",
+        "alternatives": [{"machine_id": "M1", "processing_time": 10,
+                          "workers": {}}],
+        "frozen": null}
+     ]}
+  ],
+  "machine_downtime": [],
+  "worker_unavailability": [],
+  "setup_times": [],
+  "blocked_operations": []
+}

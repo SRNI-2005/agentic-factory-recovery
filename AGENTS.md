@@ -14,8 +14,9 @@ Agents own semantics (translate/propose/explain); deterministic solvers own math
 
 ```bash
 docker compose up -d        # REQUIRED before db/mqtt tests or any DB work (TimescaleDB :5432, Mosquitto :1883, coe/coe/coe)
-uv run pytest -q            # full suite (~80 tests, ~85s); requires compose stack up
-uv run pytest -m "not mqtt" # skip broker-dependent tests
+uv run pytest -q                          # full suite incl slow pins (~215 tests, ~5 min)
+uv run pytest -m "not mqtt and not slow"  # QUICK GATE (~209 tests, ~4 min) - use this during development
+uv run pytest -m "not mqtt"               # skip broker-dependent tests only
 
 uv run python -m coe.cli db reset        # DESTRUCTIVE: drops user tables, re-runs all migrations
 uv run python -m coe.cli import mk01     # also: import hutter --path FILE | --dir DIR, import gass

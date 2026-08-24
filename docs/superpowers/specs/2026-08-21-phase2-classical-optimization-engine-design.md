@@ -1,8 +1,18 @@
 # Phase 2: Classical Optimization Engine
 
-**Status:** Approved
+**Status:** Approved — Amended 2026-08-23 (worker-dependent processing times)
 **Date:** 2026-08-21
 **Phase:** Classical Optimization Engine
+
+> **Amendment 2026-08-23 (user-approved):** solver alternatives carry per-worker processing durations sourced from `operation_machine_worker_times` (Phase 1 §6.3, authoritative). The payload's alternative schema gains a `workers` duration map (§5); CP-SAT models one optional interval per machine-worker combination whose duration is the assigned worker's (§6.2, §6.5); the safe horizon accounts for worker durations (§6.7); truncated recovery operations rescale worker durations proportionally (§3.1). An absent or empty `workers` map falls back to the machine-level `processing_time` with no worker requirement (pure benchmarks such as MK01). Rationale: the Nouri-derived worker layer encodes per-person speed variation (±15% skill factor); scheduling it makes worker choice affect makespan and tardiness instead of availability only.
+
+> **Amendment 2026-08-24 (user-approved): material capacity enforcement (Option B hybrid).** Materials move from advisory-only gatekeeping into the constraint model. §5: the payload gains a root `materials` array (`{"sku", "capacity"}`, capacity = initial stock + receipts arriving before the horizon) and per-operation `materials` demand lists. §6.11: the engine enforces inventory-non-negativity with a **reservoir** constraint — consumption events at operation starts, refill events at receipt times, floor = stock on hand — so an operation can never start unless the material physically exists, and permanently over-demanded instances are INFEASIBLE by construction instead of silently committed. §7 is restructured into three layers: zero-supply pre-blocking unchanged, temporal physics in-model, aggregate shortfall demoted to an advisory warning with structured totals. §11/§12 gain the corresponding tests and criteria. Why reservoir and not AddCumulative: a fixed-capacity cumulative cannot express time-varying supply — capacity = stock + future arrivals would let an early operation consume bars that have not arrived yet, resurrecting the timing bug this amendment closes. Phase 3 owns the business reaction (protect high-priority jobs, suspend/defer low-priority ones) per its amendment of the same date. Robustness riders folded into the same amendment (all user-approved 2026-08-24): (a) the gate/invariant exempts frozen echoes from the failed-machine membership check — historic work on a since-stripped machine cannot be rewritten and must not fail recovery; (b) variable-domain spans include Σ temporary machine-downtime durations so an operation may legitimately wait out maintenance (the old behavior declared such schedules infeasible); (c) suspension memory — the builder skips jobs whose persisted `jobs.status` is `BLOCKED` and lists them as `JOB_SUSPENDED`, so Phase 3 sacrifices are remembered across runs instead of re-litigated; (d) status truth — machines with `machines.status = 'FAILED'` are stripped even without passing them on the CLI, and workers with `workers.status = 'UNAVAILABLE'` receive full-horizon unavailability, making the mirrored columns authoritative alongside windows.
+
+> **Amendment 2026-08-24 (fourth, user-approved): multi-worker operational default.** `SOLVER_NUM_SEARCH_WORKERS` flips from 1 to **8**: speed-first for day-to-day solves. Empirically verified same day (5-scenario × 3-run probe): 8-worker runs are non-reproducible across invocations — alternative optima on mk01, a ~6% recovery-makespan swing — and on one disrupted instance they found solutions single-thread never reached at the same budget. Consequently the determinism contract (§12-9, §11 Tier 4) is now conditioned on single-worker mode, and every reproducibility consumer — benchmark proofs, byte-determinism pins, audit regeneration via stored `payload_json` — MUST set `num_search_workers=1`. The knob remains fully wired (`--workers`, env).
+
+> **Amendment 2026-08-24 (third, user-approved): honest material horizons and solver statuses.** Empirically verified against live data (H = 1827 while every scenario receipt lands at t = 2000): the strict pre-horizon receipt filter silently dropped ALL deliveries, making defer-to-delivery recoveries impossible and `EXPEDITE_MATERIAL` inert past H; separately, capacity defined as "stock + pre-horizon receipts" would have double-counted any receipt that DID land inside H (once in capacity, once as a refill event). Fixes: (1) §5/§7 — `material_receipts` lists ALL arrivals regardless of horizon (post-horizon refills are inert to the solver but audit-relevant, and a deferred operation must see its delivery); `materials[].capacity` is restated as **initial stock at t = 0**, with arrivals entering exclusively as refill events; the horizon's downtime term merges overlapping windows. (2) §3.2 — CP-SAT `UNKNOWN` passes through as status `"UNKNOWN"` instead of being conflated with `INFEASIBLE`; `INFEASIBLE` henceforth strictly means *proven* impossibility. Rationale: Phase 3's material-reactive back-edge routes on INFEASIBLE — mislabeling an unfinished search would suspend jobs merely because the budget ran out.
+
+> **Amendment 2026-08-23 (second, user-approved):** five consistency fixes against the Phase 1 data model. (1) §3.3, §11, §12: the committer mirrors schedule state onto `operations.status` inside its transaction. (2) §3.1, §5, §6.9, §12: the payload builder derives default per-job tardiness weights from `jobs.priority` (convention: **1 = most important**, per Phase 1 plan) through the existing `job_tardiness_weights` mechanism — derived last, against the run's effective α/β; Phase 3 strategy candidates may override entries. (3) §6.8, §12: a null deadline contributes zero tardiness (required by pure benchmarks such as MK01, where every deadline is null). (4) §10, §12: CLI recovery injects failures through the Phase 1 ingestion path (`ingest_telemetry_event`) instead of direct SQL, restoring audit parity with MQTT triggers and making `machine restore`'s telemetry-default clock reliable. (5) §3.1: roster availability converts to unavailability as its exact complement within `[0, H]` (H = the §6.7 conservative horizon), closing the silent after-shift availability gap.
 
 ## 1. Purpose
 
@@ -19,8 +29,9 @@ This phase does not implement agents, LLM calls, or MQTT-triggered recovery. Rec
 - A `payload_builder` module that reads Phase 1 schema and produces solver-ready JSON.
 - A `solver.engine` module implementing Google OR-Tools CP-SAT with the full constraint model.
 - A `solver.committer` module that writes solved schedules to versioned database tables.
-- Full constraint model: precedence, release times, no-overlap, machine eligibility, asymmetric processing times, sequence-dependent setup times, worker assignment and availability, worker absence windows *(Amendment 2026-08-23)*, machine downtime, deadline tardiness, and material gatekeeping.
+- Full constraint model: precedence, release times, no-overlap, machine eligibility, asymmetric processing times, sequence-dependent setup times, worker assignment and availability, worker-dependent processing durations *(Amendment 2026-08-23)*, worker absence windows *(Amendment 2026-08-23)*, machine downtime, deadline tardiness, and material gatekeeping.
 - Weighted multi-objective optimization (makespan + tardiness) with configurable weights.
+- Temporal material capacity enforcement in the engine (reservoir constraints over per-SKU stock, receipts, and operation demands) *(Amendment 2026-08-24)*.
 - Both baseline and recovery schedule solving.
 - Fixed-vs-fixed conflict clipping: frozen operations take precedence over overlapping downtime and worker-unavailability windows, with interventions recorded as payload warnings.
 - Recovery with support for multiple simultaneously failed machines.
@@ -54,21 +65,23 @@ DB (Phase 1 schema)
 Queries the database for a given instance and produces a self-contained JSON payload. Responsibilities:
 
 - Reads jobs, operations, machines, and `operation_machine_alternatives` with processing times.
+- Reads `operation_machine_worker_times` *(Amendment 2026-08-23)*: each alternative carries a `workers` map of eligible worker → specific duration. The Phase 1 importer guarantees every `(operation_id, machine_id)` alternative has at least one eligible worker row; a source instance imported without the worker layer (pure benchmarks such as MK01) yields an empty map and falls back to the machine-level `processing_time`.
 - Reads `job_families` and `setup_times` per machine.
-- Converts worker availability windows (positive) into unavailability intervals (negative).
+- Converts worker availability windows (positive) into unavailability intervals (negative) *(Amendment 2026-08-23, second)*: the builder first computes the conservative horizon `H` exactly as §6.7 specifies, then emits the complement of the unioned availability windows within `[0, H]` — including the leading edge before the first window and the trailing stretch after the last one — so workers are never implicitly available outside their shifts.
 - Reads `worker_absence_windows` directly — already negative semantics, no conversion needed *(Amendment 2026-08-23)*.
 - Reads `machine_downtime_windows` directly (already negative semantics).
-- Performs pre-solve material gatekeeping: computes material availability from `materials.initial_stock` plus `material_receipts` minus `operation_bom` requirements. Operations with provably unavailable materials are excluded from the payload and listed in `blocked_operations` with a reason.
+- Handles materials in three layers *(restructured by Amendment 2026-08-24; details in §7)*: emits `materials` capacities (initial stock + receipts strictly before the horizon) and per-operation `materials` demands from `operation_bom`; hard-blocks operations whose SKU has zero total supply (`MATERIAL_UNAVAILABLE`, cascading); records partial shortfalls as advisory warnings only — enforcement lives in the engine (§6.11). Blocked operations contribute no demands, no capacities, and no events.
 - For recovery payloads: reads the current active schedule.
   - **Completed operations:** Marked as frozen with their historic fixed assignments.
   - **In-progress on healthy machines:** Marked as frozen to prevent disrupting ongoing work.
-  - **In-progress on the failed machine (INTERRUPTED):** MUST NOT be frozen (which would crash the solver by conflicting with the downtime window). Instead, it is dynamically truncated, assigned a remaining processing time, set to `PENDING`, and given alternatives. The originally assigned worker is explicitly UN-FROZEN for the remaining duration so they are not stranded.
+  - **In-progress on the failed machine (INTERRUPTED):** MUST NOT be frozen (which would crash the solver by conflicting with the downtime window). Instead, it is dynamically truncated, assigned a remaining processing time, set to `PENDING`, and given alternatives. The originally assigned worker is explicitly UN-FROZEN for the remaining duration so they are not stranded. For truncated operations *(Amendment 2026-08-23)*, the remaining processing time replaces each alternative's machine-level duration and worker durations are rescaled by the same ratio (remaining ÷ original base, floored at 1 minute), preserving the skill spread.
   - **Failed Machine Alternatives:** For each failed machine: if its downtime `until` is `null` (permanent), it is stripped from all operation alternative lists. If the downtime is temporary, it remains in the alternative lists so the solver has the option to simply "wait it out" if setup times on other machines are too penalizing.
   - **Zero Alternatives (Dead End):** If stripping a permanently failed machine leaves any operation with an empty alternatives list, the `payload_builder` must immediately mark it as `status = BLOCKED` with reason `NO_CAPABLE_MACHINES` and exclude it from the solver payload.
 - **Blocked-Op Cascade:** Blocking an operation automatically blocks all later-sequence operations in the same job with reason `PREDECESSOR_BLOCKED`, so no successor ever loses its precedence anchor.
 - **Initial Family Seeding:** Derives `machine_initial_families`: for each machine with entries in the active schedule, the family of the last operation committed on it. Machines absent from the map are treated as clean (`from_family: null`).
 - **Conflict Clipping:** After freeze/truncate decisions, clips any remaining downtime window overlapping a frozen interval to start at the frozen op's end (drops it if fully covered). Applies the same rule to worker-unavailability windows against frozen ops assigned to that worker. Every clip or drop appends an entry to the payload `warnings` array.
 - **Setup Matrix Hygiene:** Warns when a setup pair is defined in one direction only (asymmetric row missing).
+- Derives default per-job tardiness weights *(Amendment 2026-08-23, second)*: with priorities `p_j` (1 = most important) and `n` the count of jobs holding a non-null deadline, `job_tardiness_weights[j] = beta · n · (p_max + 1 − p_j) / Σᵢ(p_max + 1 − pᵢ)` over deadline-bearing jobs. The map is mean-preserving around `beta` (identical objective magnitude to uniform weighting), self-degrades to uniform `beta` when all priorities are equal, and is omitted entirely when no job has a deadline. Jobs without deadlines never appear in the map. Derivation runs last — after any Phase 3 strategy application — using the run's effective `alpha`/`beta`, so a `WEIGHT_PRESET` override rescales the defaults rather than being nullified by them.
 - Outputs a deterministic JSON payload. The same database state and parameters produce the same payload.
 
 ### 3.2 `coe.solver.engine`
@@ -82,7 +95,7 @@ Inputs: the solver payload JSON (defined in Section 5).
 Outputs:
 - Assigned machine, worker, start time, end time, and setup time for each scheduled operation.
 - Objective value (weighted sum), makespan, and total tardiness.
-- Solver status: `OPTIMAL`, `FEASIBLE`, or `INFEASIBLE`.
+- Solver status: `OPTIMAL`, `FEASIBLE`, `INFEASIBLE`, or `UNKNOWN` *(Amendment 2026-08-24 third)* — `INFEASIBLE` strictly means proven impossibility; `UNKNOWN` means the budget expired without a proof or a solution and is never committable.
 - Solve duration in seconds.
 
 ### 3.3 `coe.solver.committer`
@@ -93,6 +106,7 @@ Takes the solution JSON and writes it to the database:
 - Links to the parent version for recovery schedules.
 - Wrapped in a database transaction: any failure rolls back the entire commit.
 - Only commits solutions with status `OPTIMAL` or `FEASIBLE`. `INFEASIBLE` results are logged to standard application logs but not committed.
+- Mirrors schedule state onto `operations.status` inside the same transaction *(Amendment 2026-08-23, second)*: each written entry with `end <= now` becomes `COMPLETED`, `start <= now < end` becomes `IN_PROGRESS`, otherwise `SCHEDULED`; every operation listed in the payload's `blocked_operations` becomes `BLOCKED`. The committer receives the recovery reference clock as `now`; baseline commits pass no clock and mark every entry `SCHEDULED`. Rollback never rewinds these mirrors — `schedule_versions` remains the audit truth. Additionally *(Amendment 2026-08-24)*, every job named in the payload's `suspended_jobs` gets `jobs.status = BLOCKED` in the same transaction, completing the suspension-memory loop with the builder.
 
 ## 4. Schedule Output Schema
 
@@ -200,9 +214,10 @@ The payload is the contract between `payload_builder` and `engine`. The solver s
           "operation_id": "J01-O2",
           "sequence": 2,
           "status": "PENDING",
+          "materials": [{"sku": "STEEL-304", "quantity": 6}],
           "alternatives": [
-            { "machine_id": "MC-03", "processing_time": 12, "eligible_workers": ["W-01", "W-03"] },
-            { "machine_id": "MC-05", "processing_time": 18, "eligible_workers": ["W-02"] }
+            { "machine_id": "MC-03", "processing_time": 12, "workers": { "W-01": 11, "W-03": 13 } },
+            { "machine_id": "MC-05", "processing_time": 18, "workers": { "W-02": 19 } }
           ],
           "frozen": null
         }
@@ -214,6 +229,14 @@ The payload is the contract between `payload_builder` and `engine`. The solver s
     { "machine_id": "MC-05", "from": 200, "until": 350, "reason": "MAINTENANCE" }
   ],
 
+  "materials": [
+    { "sku": "STEEL-304", "capacity": 10 }
+  ],
+
+  "material_receipts": [
+    { "sku": "STEEL-304", "quantity": 4, "available_at": 500 }
+  ],
+
   "worker_unavailability": [
     { "worker_id": "W-01", "from": 480, "until": 960 }
   ],
@@ -222,6 +245,8 @@ The payload is the contract between `payload_builder` and `engine`. The solver s
     { "machine_id": "MC-03", "from_family": "FAM-A", "to_family": "FAM-B", "duration": 8 },
     { "machine_id": "MC-03", "from_family": null, "to_family": "FAM-A", "duration": 5 }
   ],
+
+  "job_tardiness_weights": { "J-01": 1.25, "J-02": 0.75 },
 
   "blocked_operations": [
     { "operation_id": "J05-O3", "reason": "MATERIAL_UNAVAILABLE", "material_sku": "STEEL-304" }
@@ -234,11 +259,14 @@ Design principles:
 - `release_time` lower-bounds the start of every non-frozen operation of its job.
 - `machine_initial_families` seeds the dummy-start arc of the setup circuit; a missing entry means the machine starts clean and uses the `from_family: null` row.
 - A missing `(from_family, to_family)` row in `setup_times` means duration 0.
-- `job_tardiness_weights` (optional map of job_id → weight ≥ 0) overrides the global `beta` per job; introduced for Phase 3 strategy application. An absent map means uniform `beta` for every job.
+- `job_tardiness_weights` (map of job_id → weight ≥ 0) overrides the global `beta` per job. The payload builder derives it from `jobs.priority` by default (§3.1; mean-preserving around `beta`, 1 = most important) *(Amendment 2026-08-23, second)*; Phase 3 strategy candidates may override entries. An absent map means uniform `beta` for every job.
 - `warnings` records payload_builder interventions (clipped or dropped windows) for downstream explainability.
 - Completed operations and operations in-progress on healthy machines have empty `alternatives` and a `frozen` block with fixed assignments.
 - Operations interrupted by a machine failure are NOT frozen; they are dynamically truncated to their remaining processing time, set to `PENDING`, and given alternatives excluding the failed machine.
 - Worker unavailability is pre-converted from positive availability windows by the payload builder.
+- Each alternative's `workers` map binds an eligible worker to their specific duration (`operation_machine_worker_times`, authoritative) *(Amendment 2026-08-23)*: the engine schedules the assigned worker's duration, so worker choice affects makespan and tardiness. An absent or empty map means no worker is required and the machine-level `processing_time` applies.
+- `materials` (root) lists every demanded SKU with its `capacity` = **initial stock at t = 0** *(restated by Amendment 2026-08-24 third — arrivals enter exclusively as refill events, never folded into capacity)*. `material_receipts` (root) lists **all** arrivals as `{sku, quantity, available_at}`, regardless of horizon: post-horizon refills are inert to the solver but audit-relevant, and an operation deferred past a delivery must see that delivery. Per-operation `materials` lists carry `{sku, quantity}` from `operation_bom`; frozen, completed, and blocked operations carry empty/absent lists. The engine treats a demanded SKU missing from the root array as capacity 0 with no receipts (defensive; normally pre-blocked).
+- `failed_machines` (root, Amendment 2026-08-24 robustness): sorted names of EVERY machine excluded due to failure — CLI-named failures and status-derived strips alike — so the committer's `failed_machine_ids` audit column records the full truth even when stripping came from `machines.status` rather than the CLI. Baseline payloads emit `[]` unless status-truth stripping fired.
 - Blocked operations are excluded from solving and listed with a reason for downstream explainability.
 - Setup times use `from_family: null` for initial setup on a machine.
 - `machine_downtime` entries with `until: null` represent permanent failures. Note: Permanently failed machines are stripped from the `machines` array entirely, and their downtime entries must ALSO be omitted from `machine_downtime` to prevent the solver from throwing a KeyError when looking up the non-existent machine.
@@ -259,7 +287,7 @@ Each job's `release_time` lower-bounds the start of its non-frozen operations (`
 
 ### 6.2 Machine Assignment
 
-Each pending operation gets one `NewOptionalIntervalVar` per eligible machine-worker combination. `AddExactlyOne` enforces that exactly one alternative is selected.
+Each pending operation gets one `NewOptionalIntervalVar` per eligible machine-worker combination *(Amendment 2026-08-23)*. The combination's duration is the assigned worker's duration from the alternative's `workers` map, or the machine-level `processing_time` when the map is empty or absent. `AddExactlyOne` enforces that exactly one combination is selected across all alternatives.
 
 ### 6.3 No-Overlap (Machine Capacity)
 
@@ -271,7 +299,7 @@ Downtime windows are fixed intervals added to the machine's no-overlap constrain
 
 ### 6.5 Worker Assignment
 
-Each worker is modeled as a no-overlap resource. For each operation-machine alternative, the eligible workers are specified. The selected worker's interval is added to that worker's no-overlap constraint. Worker unavailability windows are fixed intervals on the worker's no-overlap constraint.
+Each worker is modeled as a no-overlap resource. Because assignment happens per machine-worker combination (§6.2), the selected combination's interval *is* the worker interval; it is added to that worker's no-overlap constraint. Worker unavailability windows are fixed intervals on the worker's no-overlap constraint.
 
 ### 6.6 Sequence-Dependent Setup Times (Explicit-Interval Pattern)
 
@@ -290,7 +318,7 @@ Initial setup (first pending operation on a machine) uses the row matching the m
 
 To prevent "horizon overflow" where a valid schedule is rejected because it extends past a naive bound, the solver's horizon must be strictly computed as:
 
-`Horizon = max(Σ max processing(pending ops) + Σ max setups + Σ temporary downtime durations, max(frozen end), max(release_time))`
+`Horizon = max(Σ max processing(pending ops) + Σ max setups + Σ temporary downtime durations, max(frozen end), max(release_time))`, where "max processing" *(Amendment 2026-08-23)* is the largest duration available to the operation: the maximum over each alternative's `workers` map values and machine-level `processing_time`.
 
 Permanent downtimes (`until: null`) are excluded because their machine is stripped and consumes no scheduling capacity. The frozen-end and release-time terms guarantee that fixed historic intervals and future-dated jobs always fit inside the horizon.
 
@@ -301,34 +329,42 @@ tardiness[j] = model.NewIntVar(0, horizon, f'tardiness_{j}')
 model.AddMaxEquality(tardiness[j], [0, last_op[j].end - deadline[j]])
 ```
 
+A job with a null `deadline` *(Amendment 2026-08-23, second)* contributes zero tardiness: no tardiness variable is created for it and it is excluded from the weighted sum. This is required by pure benchmarks such as MK01, where every deadline is null.
+
 ### 6.9 Objective Function
 
 ```python
 model.Minimize(alpha * normMakespan + beta * normTardiness)
 ```
 
-When `normalize_objectives` is enabled, both makespan and total tardiness are divided by the horizon to yield a `[0.0, 1.0]` ratio before weighting (`normMakespan = makespan / horizon`), so that `alpha` and `beta` are directly comparable across different instances. When `job_tardiness_weights` is present, tardiness is weighted per job (`Σ_j w_j * normTardiness_j`) with absent entries using the global `beta`.
+When `normalize_objectives` is enabled, both makespan and total tardiness are divided by the horizon to yield a `[0.0, 1.0]` ratio before weighting (`normMakespan = makespan / horizon`), so that `alpha` and `beta` are directly comparable across different instances. When `job_tardiness_weights` is present, tardiness is weighted per job (`Σ_j w_j * normTardiness_j`) with absent entries using the global `beta`. Weights arrive exclusively via the payload map; the engine never sees raw priorities *(Amendment 2026-08-23, second)*.
 
 ### 6.10 Frozen Operations (Recovery)
 
 Frozen operations are added as fixed-interval constants (not decision variables) to the relevant machine and worker no-overlap constraints. They occupy time on their assigned resources but are not subject to optimization.
 
-## 7. Material Gatekeeping
+## 6.11 Material Capacity (Reservoir) *(Amendment 2026-08-24)*
 
-Materials are handled as a pre-solve absolute-supply check, not as solver constraints or priority-based allocation.
+Raw materials are *consumed*, not released when an operation finishes — so inventory is a depleting resource with timed replenishment. The faithful CP-SAT primitive is the reservoir constraint, not a renewable cumulative:
 
-The `payload_builder` cannot pre-allocate materials to specific operations because the allocation order depends on the schedule, which is exactly what the solver is computing. Instead, the check is conservative:
+- **One reservoir per demanded SKU.** Events:
+  - for each PENDING operation whose `materials` list carries the SKU: a consumption event at that operation's start variable with level change `−quantity`, activated by an any-combo boolean that is true iff the operation is scheduled at all (OR of its combo literals, linked with the same implication pattern as circuit node presence);
+  - for each receipt of that SKU — **all arrivals are emitted** *(Amendment 2026-08-24 third)*: a fixed refill event at `available_at` with change `+quantity`.
+- **Floor:** `−capacity`, where capacity comes from the payload's root `materials` row (initial stock at t = 0; arrivals act exclusively through their refill events). **Ceiling:** unconstrained-large (`Σ quantities + Σ refill quantities`).
+- **Semantics:** inventory-on-hand never drops below zero at any point, hence no operation starts unless its bars physically exist at its start time. The solver may freely delay an operation past a receipt to wait for stock. Instances whose total demand can never be covered come back `INFEASIBLE` — nothing is committed, and Phase 3 reacts (its 2026-08-24 amendment).
+- Blocked/frozen/completed operations contribute no events. Demanded SKUs missing from the root `materials` array get capacity 0 (normally unreachable because of pre-blocking).
+- **Suspension memory *(Amendment 2026-08-24)*:** jobs whose persisted `jobs.status` is `BLOCKED` are excluded from the payload entirely and listed in `blocked_operations` with reason `JOB_SUSPENDED` — a Phase 3 sacrifice survives into every future payload until something un-blocks the job. The payload's root `suspended_jobs` array (job names, sorted) carries the run's own suspensions so the committer can mirror `jobs.status = BLOCKED` in its transaction.
+- Determinism: events are emitted in payload iteration order; identical payloads build identical reservoirs.
 
-1. For each material, compute `total_supply = materials.initial_stock + sum(material_receipts.quantity)` across all receipts arriving before the solver horizon.
-2. For each material, compute `total_demand = sum(operation_bom.quantity_required)` across all pending operations in the instance.
-3. If `total_supply >= total_demand`, all operations pass the material check. The solver determines the actual schedule order; material timing is implicitly feasible because enough material exists across the horizon.
-4. If `total_supply < total_demand`, the shortfall is reported. Operations are only blocked if their specific material has zero total supply (no stock and no receipts). Partial shortfalls are reported to Phase 3 agents as warnings, not as hard blocks, because the solver's schedule may naturally resolve the conflict by ordering jobs such that receipts arrive before consumption.
+## 7. Material Handling *(restructured by Amendment 2026-08-24)*
 
-This is intentionally loose. True temporal inventory routing (ensuring material is available at the exact moment an operation is scheduled) would require cumulative resource constraints in CP-SAT, which significantly increases solve complexity at 30-job scale. The conservative total-supply check avoids artificial bottlenecks while catching genuinely impossible material shortages.
+Three layers, in order:
 
-Within a single job, material flow between operations is handled implicitly by precedence constraints. Cross-job material dependencies are not modeled; jobs are independent customer orders.
+1. **Zero-supply pre-block (builder, unchanged):** a SKU with no stock and no receipts blocks every operation whose BOM references it (`MATERIAL_UNAVAILABLE`), cascading `PREDECESSOR_BLOCKED`. Provably impossible work never reaches the solver.
+2. **Temporal physics (engine, §6.11):** every remaining operation's demand feeds a per-SKU reservoir against capacity = initial stock, with all arrivals present as refill events. The solver resolves receipt-timed conflicts by delaying operations; permanently over-demanded instances return `INFEASIBLE`.
+3. **Advisory totals (builder warning):** when total demand still exceeds total supply for a SKU, the payload records `{type: MATERIAL_SHORTFALL, material_sku, total_supply, total_demand}` as before. It is informational — a heads-up for Phase 3 strategists — and no longer the enforcement mechanism.
 
-Blocked operations are excluded from the solver payload with a reason. The reason is available for Phase 3 agents to propose recovery actions (e.g., expedite a material receipt, substitute materials, defer the job).
+Rationale: aggregate totals are timing-blind — two operations drawing the same stock before a shared receipt pass the totals check while driving inventory negative at t=0. Only the solver sees start times, so only the solver can enforce the floor. Phase 3 reacts to INFEASIBLE results and structured shortfall warnings by suspending or deferring lower-priority jobs through its strategy catalog.
 
 ## 8. Schedule Versioning and Rollback
 
@@ -355,10 +391,24 @@ Phase 2 configuration extends Phase 1's `pydantic-settings` approach:
 - `SOLVER_BETA_WEIGHT` (default: 1.0)
 - `SOLVER_NORMALIZE_OBJECTIVES` (default: true)
 - `SOLVER_RANDOM_SEED` (default: 42)
-- `SOLVER_NUM_SEARCH_WORKERS` (default: 1. Must be exactly 1 to guarantee deterministic solutions.)
+- `SOLVER_NUM_SEARCH_WORKERS` (default: 8. Multi-worker is the operational default for speed; **set 1 whenever outputs must be reproducible** — benchmark proofs, byte-determinism pins, audit regeneration. Verified empirically 2026-08-24: 8-worker runs differ across invocations, including alternative optima on mk01 and a ~6% makespan swing on recovery payloads; they also solved a recovery instance single-thread starved at the same budget.)
 
-These are defaults. The `payload_builder` can override them per-run via CLI arguments or, in Phase 3, via agent-provided parameters.
+These are defaults. The `payload_builder` can override them per-run via CLI arguments or, in Phase 3, via agent-provided parameters. *(Robustness wiring, Amendment 2026-08-24: every knob is live — the builder seeds payload `config` from Settings for any value not explicitly overridden on the CLI, and the engine honors `random_seed`, `normalize_objectives`, and `num_search_workers` from that config.)*
 **Constraint:** The payload builder must enforce `alpha >= 0`, `beta >= 0`, and `(alpha + beta) > 0`. Permitting negative weights would cause the solver to maximize time/tardiness. A zero-weight objective sum (`Minimize(0)`) causes the solver to legally return the very first feasible schedule it finds, which can produce highly irrational long-running schedules.
+
+### 9.1 Weight Resolution Order *(Amendment 2026-08-23, second)*
+
+Objective weights resolve in layers; **later layers win**:
+
+| Layer | Scope | Source | Rule |
+| --- | --- | --- | --- |
+| 1. ENV / settings defaults | global scalars | `SOLVER_ALPHA_WEIGHT`, `SOLVER_BETA_WEIGHT` | operator baseline (`1.0` / `1.0`) |
+| 2. CLI flags | global scalars | `--alpha`, `--beta` | per-run human override |
+| 3. `WEIGHT_PRESET` (Phase 3) | global scalars | validated strategy candidate | per-incident override; multiple presets apply last-wins |
+| 4. Priority derivation (§3.1) | per-job map | `jobs.priority` shape scaled by effective `beta` | runs **last**, after layer 3; mean-preserving around effective `beta`; priority provides relative shape only, never absolute magnitude |
+| 5. `TARDINESS_WEIGHT` (Phase 3) | single job | validated strategy candidate | most specific; overwrites that job's entry only |
+
+Merge semantics of the final map: derivation **fills absent jobs from the formula and leaves explicitly set entries untouched** — it never wholesale-replaces a map containing explicit `TARDINESS_WEIGHT` entries. Roles are strictly separated: env/CLI/preset own *how much lateness matters in aggregate*; priority owns *which jobs matter relative to each other*; candidates own surgical exceptions. In Phase 2 only layers 1, 2, and 4 exist — there is no LLM participation anywhere in this chain.
 
 ## 10. Command Interface
 
@@ -371,7 +421,7 @@ uv run python -m coe.cli schedule show --instance factory_demo_01
 uv run python -m coe.cli schedule rollback --instance factory_demo_01
 ```
 
-`solve baseline` creates the initial schedule. `solve recovery` explicitly injects a permanent `machine_downtime_windows` row (`until: null`) for each specified failed machine into the database, sets each machine's status to `FAILED`, then reads the active schedule, freezes completed and in-progress operations, removes every failed machine, and re-solves. `machine restore` closes the open-ended downtime window (`downtime_until = at`, defaulting to the instance's latest telemetry `occurred_at`; an explicit `--at` is required when no telemetry exists) and sets the machine status back to `ACTIVE`; it does not trigger a solve — the machine simply re-enters future payloads. `schedule show` prints the active schedule. `schedule rollback` reverts to the previous version and refuses when the active version is the last remaining one.
+`solve baseline` creates the initial schedule. `solve recovery` resolves a reference clock (`--at MINUTE`, else the instance's latest telemetry `occurred_at`; error when neither exists) and injects each specified failure through the Phase 1 ingestion path *(Amendment 2026-08-23, second)*: `ingest_telemetry_event` with `event_type = FAILURE`, `occurred_at` = the resolved clock, and a content-derived `message_id` (`cli-{sha256(instance|machine)[:8]}`) — inheriting the telemetry audit row, advisory-lock interval union, idempotent re-runs (identical command ⇒ duplicate suppressed), and the automatic `FAILED` status flip; no direct SQL is written. It then reads the active schedule, freezes completed and in-progress operations against that same clock, truncates interrupted work, removes every failed machine, and re-solves; the committer receives the clock for status mirroring (§3.3). Recovery solves additionally enforce a **quality floor of 180 s** *(hardening E)* — `_recovery_floor` raises any smaller budget, including the Settings default, because disrupted payloads need materially longer search than baselines; an explicit `--time-limit` above 180 is honored as-is. Engine-side (CLI-invisible), every solve runs a **two-phase relax-then-repair warm start**: a setup-free relaxation is solved first and its complete variable assignment is replayed into the full model as a solution hint — complete hints prune search while partial hints waste it (CP-SAT Primer) — falling back to the deterministic greedy plan when the relaxation starves. `machine restore` closes the open-ended downtime window (`downtime_until = at`, defaulting to the instance's latest telemetry `occurred_at`; an explicit `--at` is required when no telemetry exists) and sets the machine status back to `ACTIVE`; it does not trigger a solve — the machine simply re-enters future payloads. `schedule show` prints the active schedule. `schedule rollback` reverts to the previous version and refuses when the active version is the last remaining one.
 
 ## 11. Validation and Testing Strategy
 
@@ -387,12 +437,15 @@ Solve the pure MK01 instance (10 jobs, 6 machines, no augmentations) and assert:
 
 Solve `factory_demo_01` (30 jobs, 8 machines, full model) and verify:
 - Every operation assigned to an eligible machine.
+- Every operation's scheduled duration equals the assigned worker's duration from its `workers` map, or the machine-level `processing_time` when no worker is assigned *(Amendment 2026-08-23)*.
 - Every precedence respected.
 - No machine overlaps (including setup intervals and downtime).
 - No worker overlaps (including unavailability windows).
 - No blocked operations in the schedule.
 - All setup times correct for family transitions.
 - Tardiness computed correctly against deadlines.
+- Payload contains `job_tardiness_weights` derived from priorities, mean-preserving around `beta`; jobs without deadlines are absent from the map *(Amendment 2026-08-23, second)*.
+- Committed entries carry mirrored `operations.status`: future entries `SCHEDULED`, clock-spanning entries `IN_PROGRESS`, ended entries `COMPLETED`, blocked operations `BLOCKED` *(Amendment 2026-08-23, second)*.
 
 ### Tier 2b: Individual Constraint Tests
 
@@ -407,6 +460,11 @@ Small, hand-crafted fixture payloads (2-3 jobs, 2-3 machines) where each constra
 | Setup skipped | Two ops, same family, same machine. | No setup gap. |
 | Initial setup | First op on machine. `from_family: null`, setup = 10. | Setup interval precedes operation. |
 | Worker no-overlap | W1 eligible for Op A and Op B. Both ops forced to start at t=0 via deadlines/precedence. | W1 assignments don't overlap (one is delayed). |
+| Worker duration honored *(Amendment 2026-08-23)* | Op A only eligible on M1; `workers` map {W1: 10, W4: 20}; W1 unavailable for the whole horizon. | Assigned worker is W4 and end − start = 20. |
+| No-worker fallback *(Amendment 2026-08-23)* | Alternative with empty/absent `workers` map (benchmark-style). | Duration = machine-level `processing_time`; no worker constraint applied. |
+| Null deadline *(Amendment 2026-08-23, second)* | Job with `deadline: null` completing at t=80. | No tardiness variable; objective excludes the job. |
+| Material timing *(Amendment 2026-08-24)* | Stock 8; receipt +2 at t=500; A(5) and B(5) both immediately eligible. | Both scheduled; the later one starts ≥ 500. |
+| Permanent over-demand *(Amendment 2026-08-24)* | Stock 10; no receipts; A(6) and B(6). | `INFEASIBLE`; no live assignments. |
 | Deadline tardiness | Job deadline = 50. Minimum feasible completion = 80. | Tardiness = 30. |
 | Frozen respected | Op A frozen at M1 t=0–15. Op B eligible on M1. | Op B starts at t≥15 on M1. |
 | Release time | Job `release_time=100`, machine idle at 0. | Op starts ≥ 100. |
@@ -431,6 +489,8 @@ Small, hand-crafted fixture payloads (2-3 jobs, 2-3 machines) where each constra
 - Assert: recovery makespan ≥ baseline makespan.
 - Multi-failure: strip two machines; assert both absent, frozen operations intact, valid schedule committed with `failed_machine_ids` recording both.
 - Clipping: baseline containing a planned maintenance window overlapping an in-progress operation; recovery asserts the window was clipped and a warning recorded.
+- Injection audit *(Amendment 2026-08-23, second)*: each `--failed-machine` appears in `telemetry_events` exactly once (content-derived idempotency); re-running the identical command creates no duplicate event or window.
+- Status mirroring *(Amendment 2026-08-23, second)*: after recovery commit, parent-frozen entries ending at/before the clock are `COMPLETED`, clock-spanning entries `IN_PROGRESS`, re-planned work `SCHEDULED`.
 
 ### Tier 4: Solver Properties
 
@@ -457,7 +517,7 @@ Phase 2 is complete when:
 6. `schedule_versions` and `schedule_entries` are populated correctly for baseline and recovery.
 7. `active_schedule` view returns the latest committed version.
 8. `coe.cli schedule rollback` reverts to the previous version.
-9. Determinism: same payload and solver seed (with `num_search_workers=1`) produces identical output.
+9. Determinism: same payload and solver seed produces identical output **in single-worker mode** (`num_search_workers=1` — mandatory for this criterion; multi-worker runs are speed-optimised and non-reproducible by design, §9).
 10. Infeasibility: impossible payload returns `INFEASIBLE` with no version committed.
 11. Solver respects `time_limit_seconds` and returns best-found solution with appropriate status.
 12. Horizon accounts for frozen ends and release times; payloads with future-dated jobs or long frozen intervals still solve.
@@ -465,6 +525,12 @@ Phase 2 is complete when:
 14. `machine restore` closes the open downtime window, flips status to `ACTIVE`, and the machine re-appears in the next built payload.
 15. Conflict clipping emits `warnings` entries whenever windows are clipped or dropped.
 16. Empty-pending payloads commit as trivially `OPTIMAL` versions with makespan equal to the latest frozen end.
+17. Worker-dependent durations *(Amendment 2026-08-23)*: every committed entry whose alternative carried a non-empty `workers` map has `processing_time` equal to the assigned worker's duration; entries from empty-map alternatives equal the machine-level duration.
+18. Status mirroring *(Amendment 2026-08-23, second)*: baseline commits mark planned entries `SCHEDULED`; recovery commits classify `COMPLETED` / `IN_PROGRESS` against the reference clock; blocked operations become `BLOCKED`; rollback leaves mirrors intact.
+19. Derived tardiness weights *(Amendment 2026-08-23, second)*: payload weights from priority are mean-preserving around `beta`; jobs with null deadlines contribute zero tardiness and MK01 still solves to optimal makespan 40.
+20. Injection audit *(Amendment 2026-08-23, second)*: CLI recovery failures land in `telemetry_events` exactly once each via the shared ingestion path; identical re-invocations create no duplicate events or windows.
+21. Material capacity *(Amendment 2026-08-24)*: committed schedules never drive any SKU's inventory negative; receipt-timed conflicts resolve by delaying the affected operation past the arrival.
+22. Permanent over-demand *(Amendment 2026-08-24)*: returns `INFEASIBLE` with no committed version; `MATERIAL_SHORTFALL` warnings persist as advisory metadata with structured totals for Phase 3.
 
 ## 13. Phase Boundary
 

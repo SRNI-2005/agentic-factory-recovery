@@ -1,0 +1,228 @@
+"""Tier 2b individual-constraint tests over hand-crafted fixture payloads."""
+import json
+from pathlib import Path
+
+import pytest
+
+from coe.solver.engine import solve
+
+FIX = Path(__file__).resolve().parent / "fixtures"
+
+
+def _fx(name):
+    return json.loads((FIX / f"{name}.json").read_text())
+
+
+def _one(payload):
+    sol = solve(payload)
+    assert sol["status"] in ("OPTIMAL", "FEASIBLE")
+    live = [a for a in sol["assignments"] if not a["is_frozen"]]
+    assert len(live) == 1
+    return sol, live[0]
+
+
+def test_release_time_honored():
+    _, a = _one(_fx("release_time"))
+    assert (a["start"], a["end"]) == (100, 110)
+
+
+def test_machine_downtime_avoided():
+    _, a = _one(_fx("machine_downtime"))
+    assert (a["start"], a["end"]) == (0, 10)      # fits before [50, 150)
+
+
+def test_frozen_respected():
+    sol = solve(_fx("frozen_respected"))
+    frozen = [x for x in sol["assignments"] if x["is_frozen"]]
+    live = [x for x in sol["assignments"] if not x["is_frozen"]]
+    assert len(frozen) == 1 and len(live) == 1
+    assert (frozen[0]["start"], frozen[0]["end"]) == (0, 15)
+    assert live[0]["machine_id"] == "M1"
+    assert live[0]["start"] >= 15
+
+
+def test_deadline_tardiness_computed():
+    sol, a = _one(_fx("deadline_tardiness"))
+    assert a["end"] == 80
+    assert sol["makespan"] == 80
+    assert sol["total_tardiness"] == 30
+    assert sol["objective_value"] == pytest.approx(110.0)   # normalization off
+
+
+def test_null_deadline_zero_tardiness():
+    sol, _ = _one(_fx("null_deadline"))
+    assert sol["total_tardiness"] == 0
+
+
+def test_empty_pending_short_circuits():
+    sol = solve(_fx("empty_pending"))
+    assert sol["status"] == "OPTIMAL"
+    assert sol["makespan"] == 15
+    assert sol["total_tardiness"] == 5          # frozen end 15 vs deadline 10
+    assert len(sol["assignments"]) == 1
+    assert sol["assignments"][0]["is_frozen"]
+
+
+def test_blocked_operations_never_scheduled():
+    p = _fx("release_time")
+    p["jobs"][0]["operations"].append({
+        "operation_id": "J1-O2", "sequence": 2, "status": "BLOCKED",
+        "alternatives": [], "frozen": None})
+    sol = solve(p)
+    assert all(a["operation_id"] != "J1-O2" for a in sol["assignments"])
+
+
+def test_worker_unavailability_delays_start():
+    _, a = _one(_fx("worker_unavailable"))
+    assert a["worker_id"] == "W1"
+    assert (a["start"], a["end"]) == (100, 110)
+
+
+def test_worker_duration_selection_forced_to_slower():
+    """Tier-2b: worker-specific durations are first-class combos — with W1
+    unavailable, the engine must pick W4 at its own (slower) duration."""
+    sol, a = _one(_fx("worker_duration_selection"))
+    assert a["worker_id"] == "W4"
+    assert (a["start"], a["end"]) == (0, 20)
+
+
+def test_no_worker_fallback_uses_machine_duration():
+    _, a = _one(_fx("no_worker_fallback"))
+    assert a["worker_id"] is None
+    assert (a["start"], a["end"]) == (0, 10)
+
+
+def test_worker_no_overlap_serializes():
+    sol = solve(_fx("worker_no_overlap"))
+    assert sorted(a["start"] for a in sol["assignments"]) == [0, 5]
+    assert sorted(a["end"] for a in sol["assignments"]) == [5, 10]
+    workers = {a["worker_id"] for a in sol["assignments"]}
+    assert workers == {"W1"}
+
+
+def test_machine_downtime_waited_out():
+    p = _fx("release_time")
+    p["machine_downtime"] = [{"machine_id": "M0", "from": 0,
+                              "until": 100000, "reason": "MAINTENANCE"}]
+    sol = solve(p)
+    assert sol["status"] in ("OPTIMAL", "FEASIBLE")
+    live = [a for a in sol["assignments"] if not a["is_frozen"]]
+    assert len(live) == 1
+    assert live[0]["start"] >= 100000
+
+
+def test_invalid_weights_rejected():
+    p = _fx("release_time")
+    p["config"]["alpha"] = -1.0
+    with pytest.raises(ValueError):
+        solve(p)
+
+
+def test_zero_sum_weights_rejected():
+    p = _fx("release_time")
+    p["config"]["alpha"] = 0.0
+    p["config"]["beta"] = 0.0
+    with pytest.raises(ValueError):
+        solve(p)
+
+
+# --- temporal material capacity (spec §6.11, Amendment 2026-08-24) ---------
+
+def test_material_timing_delays_one_op():
+    sol = solve(_fx("material_timing"))
+    assert sol["status"] in ("OPTIMAL", "FEASIBLE")
+    starts = sorted(a["start"] for a in sol["assignments"])
+    assert starts[0] == 0
+    assert starts[1] >= 500
+
+
+def test_permanent_over_demand_is_infeasible():
+    sol = solve(_fx("over_demand"))
+    assert sol["status"] == "INFEASIBLE"
+    assert [a for a in sol["assignments"] if not a["is_frozen"]] == []
+
+
+def test_unknown_demanded_sku_defaults_to_zero():
+    p = _fx("material_timing")
+    for j in p["jobs"]:
+        for op in j["operations"]:
+            op["materials"] = [{"sku": "GHOST", "quantity": 1}]
+    p.pop("materials", None)
+    p.pop("material_receipts", None)
+    assert solve(p)["status"] == "INFEASIBLE"
+
+
+# --- sequence-dependent setups (spec §6.6) ---------------------------------
+
+def _live_triples(sol):
+    return sorted(
+        (a["start"], a["end"], a["setup_time"])
+        for a in sol["assignments"] if not a["is_frozen"])
+
+
+def test_setup_enforced_cheapest_order_wins():
+    """Two single-op jobs (families A/B) sharing M0; A→B=20, B→A=2.
+    Solver must run B first: makespan 12 beats 30."""
+    sol = solve(_fx("setup_enforced"))
+    assert sol["makespan"] == 12
+    triples = _live_triples(sol)
+    assert triples[0] == (0, 5, 0)          # B first, no initial row
+    assert triples[1][0] == 7               # setup [5,7) then A
+    assert triples[1][2] == 2
+
+
+def test_setup_skipped_same_family():
+    sol = solve(_fx("setup_skipped"))
+    assert _live_triples(sol) == [(0, 5, 0), (5, 10, 0)]
+
+
+def test_initial_setup_precedes_first_op():
+    sol, a = _one(_fx("initial_setup"))
+    assert (a["start"], a["setup_time"]) == (10, 10)
+
+
+def test_initial_setup_from_history():
+    sol, a = _one(_fx("initial_from_history"))
+    assert (a["start"], a["setup_time"]) == (7, 7)
+
+
+def test_missing_setup_row_means_zero():
+    sol = solve(_fx("missing_setup_row"))
+    assert _live_triples(sol) == [(0, 5, 0), (5, 10, 0)]
+
+
+# --- malformed windows must fail loudly --------------------------------------
+
+def test_malformed_downtime_window_rejected():
+    p = _fx("release_time")
+    p["machine_downtime"] = [{"machine_id": "M0", "from": 50,
+                              "until": 50, "reason": "X"}]
+    with pytest.raises(ValueError):
+        solve(p)
+
+
+def test_open_worker_window_rejected():
+    p = _fx("worker_unavailable")
+    p["worker_unavailability"] = [{"worker_id": "W1", "from": 0,
+                                   "until": None}]
+    with pytest.raises(ValueError):
+        solve(p)
+
+
+def test_unknown_budget_reports_unknown(monkeypatch):
+    from ortools.sat.python import cp_model as cm
+
+    from coe.solver import engine
+
+    class FakeSolver:
+        class parameters:
+            pass
+
+        def Solve(self, model):
+            return cm.UNKNOWN
+
+    monkeypatch.setattr(engine, "CpSolver", FakeSolver)
+    r = solve(_fx("worker_no_overlap"))
+    assert r["status"] == "UNKNOWN"
+    assert [x for x in r["assignments"]
+            if not x["is_frozen"]] == []
