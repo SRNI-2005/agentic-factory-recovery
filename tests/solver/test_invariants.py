@@ -71,7 +71,7 @@ def test_worker_and_duration_mismatch_detected():
     p = _payload()
     sol = _solution()
     sol["assignments"][1]["worker_id"] = "W2"
-    assert any("ineligible" in v for v in check_solution(p, sol))
+    assert any("worker W2 ineligible" in v for v in check_solution(p, sol))
     sol2 = _solution()
     sol2["assignments"][1]["processing_time"] = 7
     assert any("duration" in v for v in check_solution(p, sol2))

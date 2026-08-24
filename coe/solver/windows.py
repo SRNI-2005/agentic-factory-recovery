@@ -5,7 +5,9 @@ overlapping ones under this convention, matching the Phase 1 union rule.
 """
 
 
-def merge_intervals(pairs):
+def merge_intervals(
+    pairs: list[tuple[int, int]] | list[list[int]],
+) -> list[tuple[int, int]]:
     out: list[list[int]] = []
     for s, e in sorted(pairs):
         if e <= s:
@@ -17,7 +19,10 @@ def merge_intervals(pairs):
     return [(s, e) for s, e in out]
 
 
-def complement(start, end, busy):
+def complement(
+    start: int, end: int,
+    busy: list[tuple[int, int]] | list[list[int]],
+) -> list[tuple[int, int]]:
     gaps: list[tuple[int, int]] = []
     cursor = start
     for s, e in merge_intervals(busy):
@@ -32,7 +37,10 @@ def complement(start, end, busy):
     return gaps
 
 
-def clip_window(window, busy):
+def clip_window(
+    window: tuple[int, int],
+    busy: list[tuple[int, int]] | list[list[int]],
+) -> tuple[int, int] | None:
     ws, we = window
     for bs, be in sorted(busy):
         if bs < we and ws < be:

@@ -15,6 +15,18 @@ def test_complement_leading_gaps_trailing():
     assert complement(5, 15, [(0, 30)]) == []
 
 
+def test_complement_handles_unsorted_and_overlapping_busy():
+    # DEVIATION from triage listing: [10,30) U [20,35) merges to [10,35),
+    # so the mid gap is (35,40) — the listed (30,40) would mark busy
+    # time [30,35) as free.
+    assert complement(0, 100, [(40, 60), (10, 30), (20, 35)]) == \
+        [(0, 10), (35, 40), (60, 100)]
+
+
+def test_complement_degenerate_busy_dropped():
+    assert complement(0, 10, [(3, 3), (12, 20)]) == [(0, 10)]
+
+
 def test_clip_partial_overlap_pushes_to_busy_end():
     assert clip_window((150, 250), [(100, 200)]) == (200, 250)
 

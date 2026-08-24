@@ -91,3 +91,31 @@ def test_hint_avoids_frozen_occupancy():
     for h in live:
         assert (h["machine_id"] != "M1"
                 or h["start"] >= 15), h
+
+
+def test_normalized_short_circuit_and_weights():
+    """normalize=True combos across the three finish() paths: short-circuit
+    (H = max(mk,1)), weighted tardiness (per-job beta), and INFEASIBLE."""
+    # (a) empty-pending short circuit: H = max(15,1) = 15
+    p = _fx("empty_pending")
+    p["config"]["normalize_objectives"] = True
+    sol = solve(p)
+    assert sol["status"] == "OPTIMAL"
+    assert sol["objective_value"] == pytest.approx((15 + 5) / 15)
+
+    # (b) per-job tardiness weight rides the normalized ratio: (80+2*30)/80
+    p = _fx("deadline_tardiness")
+    p["config"]["normalize_objectives"] = True
+    p["job_tardiness_weights"] = {"J1": 2.0}
+    sol = solve(p)
+    assert sol["objective_value"] == pytest.approx((80 + 2 * 30) / 80)
+
+    # (c) full-horizon downtime on the only machine with release pinned to 0:
+    # span headroom equals processing exactly, so the op cannot escape [0,H).
+    p = _fx("release_time")
+    p["jobs"][0]["release_time"] = 0
+    p["machine_downtime"] = [{"machine_id": "M0", "from": 0,
+                              "until": None, "reason": "FAILURE"}]
+    sol = solve(p)
+    assert sol["status"] == "INFEASIBLE"
+    assert sol["objective_value"] == 0.0

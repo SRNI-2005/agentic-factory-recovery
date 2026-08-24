@@ -1,9 +1,9 @@
 import pytest
 from sqlalchemy.orm import Query
 
-MK01 = "data/raw/mk01/mk01.txt"
-SFJW = "data/raw/nouri-fjspw/extracted/SFJW/SFJW-01.txt"
-GASS = "data/raw/gass"
+MK01_PATH = "data/raw/mk01/mk01.txt"
+SFJW_PATH = "data/raw/nouri-fjspw/extracted/SFJW/SFJW-01.txt"
+GASS_DIR = "data/raw/gass"
 
 # The installed SQLAlchemy 2.0.52 build lacks the documented legacy
 # Query.scalar_one; the canonical recovery tests rely on it.
@@ -14,24 +14,33 @@ if not hasattr(Query, "scalar_one"):
     Query.scalar_one = _scalar_one
 
 
-@pytest.fixture(scope="session")
-def built_db():
-    """Reset once per session, import sources, build factory_demo_01.
-    Read-only tests share this; state-mutating tests (Parts 3/5) must create
-    their own instances or reset themselves."""
+def build_all_sources_and_scenario():
+    """Single recipe for reset + imports + factory_demo_01(seed=42).
+    Returns scenario instance id."""
+    from pathlib import Path
+
     from coe.config import get_settings
     from coe.db.admin import reset_database
     from coe.parsers.gass import import_gass
     from coe.parsers.mk01 import import_mk01
     from coe.parsers.nouri import import_nouri
     from coe.scenario.build import build_scenario
-    from pathlib import Path
 
     reset_database(get_settings().database_url)
-    import_mk01(Path(MK01))
-    import_nouri(Path(SFJW))
-    import_gass(Path(GASS))
-    sid = build_scenario("factory_demo_01", seed=42)
+    import_mk01(Path(MK01_PATH))
+    import_nouri(Path(SFJW_PATH))
+    import_gass(Path(GASS_DIR))
+    return build_scenario("factory_demo_01", seed=42)
+
+
+@pytest.fixture(scope="session")
+def built_db():
+    """Reset once per session, import sources, build factory_demo_01.
+    Read-only tests share this; state-mutating tests (Parts 3/5) must create
+    their own instances or reset themselves."""
+    from coe.config import get_settings
+
+    sid = build_all_sources_and_scenario()
     return {"settings": get_settings(), "scenario_id": sid}
 
 
@@ -74,7 +83,6 @@ def seeded_recovery_env(built_db):
         WorkerAbsenceWindow,
     )
     from coe.db.models.fjsp import Job, Machine, Operation
-    from coe.db.models.provenance import Instance
     from coe.db.models.schedule import ScheduleEntry, ScheduleVersion
     from coe.db.models.workers import Worker
     from coe.db.session import session_scope
@@ -83,9 +91,19 @@ def seeded_recovery_env(built_db):
     sid = built_db["scenario_id"]
     NOW = 1000
     with session_scope() as session:
+        def _id(model, name):
+            return session.execute(
+                select(model.id).where(model.instance_id == sid,
+                                       model.name == name)
+            ).scalar_one()
+
+        m = {n: _id(Machine, n) for n in ("M0", "M1", "M2", "M3")}
+        w = {n: _id(Worker, n) for n in ("W1", "W2", "W3", "W4")}
+
         # idempotency: drop earlier seed artifacts (entries first — the
-        # schedule_entries.version_id FK has no ON DELETE CASCADE), plus any
-        # downtime/absence windows this fixture seeded on earlier runs.
+        # schedule_entries.version_id FK has no ON DELETE CASCADE), plus the
+        # exact downtime/absence windows this fixture seeds — NOT whole-table
+        # wipes, which would silently destroy scenario MAINTENANCE rows.
         seeded_versions = (
             session.query(ScheduleVersion.id)
             .filter(ScheduleVersion.instance_id == sid,
@@ -100,21 +118,21 @@ def seeded_recovery_env(built_db):
             ScheduleVersion.payload_hash.like("seeded-%"),
         ).delete(synchronize_session=False)
         session.query(MachineDowntimeWindow).filter(
-            MachineDowntimeWindow.instance_id == sid,
+            MachineDowntimeWindow.machine_id == m["M1"],
+            MachineDowntimeWindow.downtime_from == 1000,
+            MachineDowntimeWindow.downtime_until == 1100,
+        ).delete(synchronize_session=False)
+        session.query(MachineDowntimeWindow).filter(
+            MachineDowntimeWindow.machine_id == m["M0"],
+            MachineDowntimeWindow.downtime_from == 480,
+            MachineDowntimeWindow.downtime_until == 520,
         ).delete(synchronize_session=False)
         session.query(WorkerAbsenceWindow).filter(
-            WorkerAbsenceWindow.instance_id == sid,
+            WorkerAbsenceWindow.worker_id == w["W1"],
+            WorkerAbsenceWindow.absence_from == 300,
+            WorkerAbsenceWindow.absence_until == 600,
         ).delete(synchronize_session=False)
         session.flush()
-
-        def _id(model, name):
-            return session.execute(
-                select(model.id).where(model.instance_id == sid,
-                                       model.name == name)
-            ).scalar_one()
-
-        m = {n: _id(Machine, n) for n in ("M0", "M1", "M2", "M3")}
-        w = {n: _id(Worker, n) for n in ("W1", "W2", "W3", "W4")}
 
         def _op(job_name, seq):
             jid = session.execute(

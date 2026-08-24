@@ -182,6 +182,7 @@ def test_suspended_jobs_mirror_to_jobs_table(built_db):
     from coe.solver.payload_builder import build_payload
 
     victim = None
+    vid = None
     with session_scope() as session:
         inst = _inst(session, "factory_demo_01")
         payload = build_payload(session, instance_row=inst,
@@ -195,14 +196,23 @@ def test_suspended_jobs_mirror_to_jobs_table(built_db):
         solution = {"status": "OPTIMAL", "objective_value": 1.0,
                     "makespan": 1, "total_tardiness": 0,
                     "assignments": [], "solve_duration_seconds": 0.0}
-        commit_solution(session, instance_row=inst, payload=payload,
-                        solution=solution)
+        version = commit_solution(session, instance_row=inst, payload=payload,
+                                  solution=solution)
+        vid = version.id
         status = (session.query(Job.status)
                   .filter(Job.instance_id == inst.id, Job.name == victim)
                   .scalar_one())
     assert status == "BLOCKED"
     with session_scope() as session:          # restore for downstream suites
         inst = _inst(session, "factory_demo_01")
+        # shared-instance hygiene: remove this test's ghost empty-assignment
+        # version (entries first — no ON DELETE CASCADE on version_id).
+        from coe.db.models.schedule import ScheduleEntry, ScheduleVersion
+
+        session.query(ScheduleEntry).filter(
+            ScheduleEntry.version_id == vid).delete(synchronize_session=False)
+        session.query(ScheduleVersion).filter(
+            ScheduleVersion.id == vid).delete(synchronize_session=False)
         session.query(Job).filter(Job.instance_id == inst.id,
                                   Job.name == victim).update(
             {Job.status: original}, synchronize_session=False)

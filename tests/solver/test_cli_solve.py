@@ -18,20 +18,9 @@ def fresh_demo_instance():
     must guarantee a freshly built factory_demo_01 with an empty version
     chain. Later suites re-request the session-scoped ``built_db`` fixture,
     which resets again — no state leaks either direction."""
-    from pathlib import Path
+    from tests.solver.conftest import build_all_sources_and_scenario
 
-    from coe.config import get_settings
-    from coe.db.admin import reset_database
-    from coe.parsers.gass import import_gass
-    from coe.parsers.mk01 import import_mk01
-    from coe.parsers.nouri import import_nouri
-    from coe.scenario.build import build_scenario
-
-    reset_database(get_settings().database_url)
-    import_mk01(Path("data/raw/mk01/mk01.txt"))
-    import_nouri(Path("data/raw/nouri-fjspw/extracted/SFJW/SFJW-01.txt"))
-    import_gass(Path("data/raw/gass"))
-    build_scenario("factory_demo_01", seed=42)
+    build_all_sources_and_scenario()
 
 
 def cli(*args):

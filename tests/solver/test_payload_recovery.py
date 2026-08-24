@@ -155,8 +155,14 @@ def test_dead_end_blocks_cascade(env, demo_session):
 
 
 def test_downtime_fully_covered_dropped(env):
+    # DEVIATION from pre-cluster-D form: the seeder narrow-deletes only its
+    # own tuples now, so scenario MAINTENANCE rows (e.g. M1 [1265,1330))
+    # legitimately survive into the payload; assert the seeded covered
+    # window specifically, not the absence of every M1 row.
     p = _build(env)
-    assert [d for d in p["machine_downtime"] if d["machine_id"] == "M1"] == []
+    m1 = [(d["from"], d["until"]) for d in p["machine_downtime"]
+          if d["machine_id"] == "M1"]
+    assert (1000, 1100) not in m1
     dropped = [w for w in p["warnings"] if w["type"] == "DOWNTIME_DROPPED"]
     assert len(dropped) == 1
     assert dropped[0]["window"] == [1000, 1100]

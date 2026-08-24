@@ -34,6 +34,13 @@ def _sql(q, **params):
 def test_committed_durations_match_worker_times():
     """c17: every active-version entry's duration equals the assigned
     worker's duration, or the machine-level alternative when workerless."""
+    present = _sql(
+        "SELECT count(*) FROM schedule_versions sv "
+        "JOIN instances i ON i.id = sv.instance_id "
+        "WHERE i.name = 'factory_demo_01' AND sv.version_number = 1"
+    ).scalar_one()
+    if not present:
+        pytest.skip("factory_demo_01 v1 not present (standalone run)")
     mismatches = _sql(
         """
         SELECT count(*) FROM schedule_entries se
