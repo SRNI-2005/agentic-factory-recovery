@@ -50,7 +50,7 @@ def test_factory_baseline_shape(demo_session):
     assert p["blocked_operations"] == []      # stock = 1.2x demand at build
     assert p["config"] == {"alpha": 1.0, "beta": 1.0, "time_limit_seconds": 60,
                            "normalize_objectives": True,
-                           "random_seed": 42, "num_search_workers": 1}
+                           "random_seed": 42, "num_search_workers": 8}
     assert p["failed_machines"] == []
 
 

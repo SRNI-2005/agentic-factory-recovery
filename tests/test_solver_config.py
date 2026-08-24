@@ -8,7 +8,7 @@ def test_solver_defaults_match_spec():
     assert s.solver_beta_weight == 1.0
     assert s.solver_normalize_objectives is True
     assert s.solver_random_seed == 42
-    assert s.solver_num_search_workers == 1
+    assert s.solver_num_search_workers == 8
 
 
 def test_env_override(monkeypatch):
@@ -27,4 +27,4 @@ def test_settings_isolation(monkeypatch):
     s = Settings()
     assert (s.solver_alpha_weight, s.solver_beta_weight,
             s.solver_random_seed, s.solver_num_search_workers,
-            s.solver_normalize_objectives) == (1.0, 1.0, 42, 1, True)
+            s.solver_normalize_objectives) == (1.0, 1.0, 42, 8, True)

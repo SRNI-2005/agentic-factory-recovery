@@ -1,7 +1,7 @@
 """Pure CP-SAT solver: payload JSON in -> solution JSON out (spec §3.2, §6).
 
 No database access, no LLM calls, no side effects. Deterministic by contract:
-num_search_workers=1 plus insertion-ordered construction over the payload's
+insertion-ordered construction over the payload's
 ordered lists. Half-open time convention: [start, end).
 
 Hardening E: solve() runs two-phase relax-then-repair. Phase A solves the
@@ -672,7 +672,7 @@ def solve(payload: dict) -> dict:
     normalize = bool(cfg.get("normalize_objectives", True))
     time_limit = float(cfg.get("time_limit_seconds", 60))
     seed = int(cfg.get("random_seed", 42))
-    workers = int(cfg.get("num_search_workers", 1))
+    workers = int(cfg.get("num_search_workers", 8))
 
     def terms_for(ends_by_job: dict[str, int]) -> list[tuple[float, int]]:
         out = []

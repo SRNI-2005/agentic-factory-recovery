@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     solver_beta_weight: float = 1.0
     solver_normalize_objectives: bool = True
     solver_random_seed: int = 42
-    solver_num_search_workers: int = 1
+    solver_num_search_workers: int = 8
 
 
 @lru_cache

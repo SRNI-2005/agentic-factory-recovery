@@ -15,7 +15,8 @@ def solved(built_db):
     with session_scope() as session:
         inst = session.query(Instance).filter(Instance.name == "mk01").one()
         payload = build_payload(session, instance_row=inst,
-                                alpha=1.0, beta=1.0, time_limit_seconds=120)
+                                alpha=1.0, beta=1.0, time_limit_seconds=120,
+                                num_search_workers=1)
         return payload, solve(payload)
 
 
