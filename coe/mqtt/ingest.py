@@ -194,8 +194,9 @@ def ingest_telemetry_event(payload_dict: dict) -> tuple[int, bool]:
                     if payload.estimated_downtime is not None else None
                 )
             else:
-                duration_until = payload.occurred_at + (
-                    payload.estimated_downtime or 0
+                duration_until = (
+                    payload.occurred_at + payload.estimated_downtime
+                    if payload.estimated_downtime is not None else None
                 )
         elif kind == "WORKER":
             row = (
