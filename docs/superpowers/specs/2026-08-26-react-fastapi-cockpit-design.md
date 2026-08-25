@@ -85,8 +85,10 @@ Every router handler delegates to `coe/services/*`; services contain all orchest
 | Worker absent/return | `POST /api/actions/worker/{absent,return}` | MQTT WORKER topic |
 | Material shortage | `POST /api/actions/material/shortage` | MQTT MATERIAL telemetry |
 | Suspend/resume job | `POST /api/actions/job/{suspend,resume}` | direct `status=BLOCKED/PENDING` |
-| Start recovery (chat) | `POST /api/runs {narrative}` → `{run_id}` | background task + topic |
-| Decision feed | `GET /api/runs/{id}/events` (SSE) | node-boundary events, then terminal state |
+| Start recovery (chat) | `POST /api/runs {narrative}` → `{stream_token}` | background task + event log |
+| Decision feed | `GET /api/runs/stream/{token}/events` (SSE) | node-boundary events, terminal state carries the numeric `run_id` |
+
+Run addressing: `recovery_runs` rows are inserted only at graph completion (CHECK-constrained status domain forbids placeholders), so runs are addressed pre-completion by an opaque stream token; the terminal SSE event delivers the persisted `run_id` for later lookup via `GET /api/runs`.
 | Live rail | `GET /api/events/stream` (SSE) | passive paho mirror thread |
 | Runs history | `GET /api/runs?instance=` | run rows + timings |
 | Benchmarks | `GET /api/benchmarks/fidelity` | report JSON |
