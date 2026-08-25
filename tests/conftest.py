@@ -36,3 +36,14 @@ def demo_scenario(clean_db):
     import_nouri(Path("data/raw/nouri-fjspw/extracted/SFJW/SFJW-01.txt"))
     import_gass(Path("data/raw/gass"))
     return build_scenario("factory_demo_01", seed=42)
+
+
+@pytest.fixture()
+def fake_llm():
+    """Factory fixture: fake_llm(["resp", ...]) or fake_llm({key: resp})."""
+    from tests.fixtures.llm.fake_client import FakeLLMClient
+
+    def _make(responses):
+        return FakeLLMClient(responses)
+
+    return _make

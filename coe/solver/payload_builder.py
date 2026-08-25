@@ -321,6 +321,10 @@ def build_payload(
         .order_by(Material.sku, OperationBom.operation_id).all()
     )
     bom_by_op: dict[str, list[dict]] = {}
+    # Amendment 2026-08-25 (fifth): op release minutes feed time-phased
+    # MATERIAL_SHORTFALL detection (same key set as bom_by_op).
+    release_by_op: dict[str, int] = {}
+    job_release = {j.id: j.release_time for j in jobs}
     for row, sku in boms:
         if row.operation_id in suspended_op_ids:
             continue
@@ -328,6 +332,7 @@ def build_payload(
         oid_ = op_id(job_name[op_row.job_id], op_row.sequence_number)
         bom_by_op.setdefault(oid_, []).append(
             {"sku": sku, "quantity": row.quantity_required})
+        release_by_op.setdefault(oid_, max(job_release[op_row.job_id], 0))
     receipt_rows = (
         session.query(MaterialReceipt, Material.sku)
         .join(Material, Material.id == MaterialReceipt.material_id)
@@ -447,6 +452,7 @@ def build_payload(
                    "available_at": r.available_at}
                   for r, sku in receipt_rows],
         bom_by_op=bom_by_op,
+        release_by_op=release_by_op,
     )
     for entries in ops_by_job.values():
         for e in entries:

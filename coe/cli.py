@@ -203,6 +203,77 @@ def _run_rollback(args) -> None:
         print(f"rolled back {rolled} -> active {active}")
 
 
+def _run_recover(args, client=None) -> None:
+    from coe.config import get_settings
+
+    s = get_settings()
+    if client is None:
+        # §9: fail fast BEFORE the graph starts (production path only;
+        # injected clients are test doubles and skip the check).
+        try:
+            from coe.agents.llm_client import require_llm_config
+
+            require_llm_config(s)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
+
+    if not args.narrative and not args.narrative_file:
+        raise SystemExit("recover requires --narrative or --narrative-file")
+    narrative = args.narrative or Path(args.narrative_file).read_text()
+
+    from coe.agents.graph import execute_recovery
+
+    w = _weight_overrides(args)   # parser parity with solve; inert until needed
+    outcome = execute_recovery(
+        args.instance, trigger="CLI", narrative=narrative,
+        reference_clock=args.at,
+        client=client,
+        lock_wait=s.recovery_lock_wait_seconds)
+    st = outcome["state"]
+    sol = st.solution or {}
+    print(f"recovery {args.instance}: status={outcome['status']} "
+          f"solver={sol.get('status')} makespan={sol.get('makespan')} "
+          f"version={st.committed_version_id} run_id={outcome['run_id']}")
+    if outcome["status"] != "COMMITTED":
+        raise SystemExit(f"recovery ended {outcome['status']}")
+
+
+def _run_explain(args, client=None) -> None:
+    from coe.agents.nodes.explain import explain_version
+
+    if client is None:
+        from coe.agents.llm_client import make_llm_client
+
+        client = make_llm_client()
+    prose = explain_version(args.instance, client=client)
+    if prose is None:
+        print("explanation unavailable (LLM failure or nothing to explain)")
+        return
+    print(prose)
+
+
+def _run_benchmark(args, client=None) -> None:
+    from coe.config import get_settings
+
+    if client is None:
+        from coe.agents.llm_client import make_llm_client
+
+        client = make_llm_client()
+    from coe.agents.benchmark import run_fidelity, write_report
+
+    s = get_settings()
+    seed = args.seed if args.seed is not None else s.default_seed
+    report = run_fidelity(Path(args.corpus), client=client,
+                          solve_budget_seconds=s.solver_time_limit_seconds)
+    write_report(report, Path("benchmark_report.json"))
+    agg = report["translation"]["aggregate"]
+    print(f"fidelity seed={seed} "
+          f"pass={agg['corpus_pass_rate']:.3f} "
+          f"exact={agg['exact_match_rate']:.3f} "
+          f"threshold={'MET' if report['threshold_met'] else 'MISS'} "
+          "-> benchmark_report.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coe", description="COE factory recovery system")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -262,8 +333,27 @@ def build_parser() -> argparse.ArgumentParser:
     rback = sch_sub.add_parser("rollback")
     rback.add_argument("--instance", required=True)
 
+    rec = sub.add_parser("recover", help="full agentic recovery graph")
+    rec.add_argument("--instance", required=True)
+    rec.add_argument("--narrative", default=None)
+    rec.add_argument("--narrative-file", default=None, dest="narrative_file")
+    rec.add_argument("--at", type=int, default=None)
+    _weight_args(rec)
+
+    ex = sub.add_parser("explain", help="explain the active schedule version")
+    ex.add_argument("--instance", required=True)
+
+    bm = sub.add_parser("benchmark",
+                        help="fidelity benchmarks over synthetic corpora")
+    bm_sub = bm.add_subparsers(dest="benchmark_cmd", required=True)
+    bf = bm_sub.add_parser("fidelity")
+    bf.add_argument("--corpus", required=True)
+    bf.add_argument("--seed", type=int, default=None)
+
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
+    mq_sub.add_parser("listen")
+
     tf = mq_sub.add_parser("test-failure")
     tf.add_argument("--instance", default="factory_demo_01")
     tf.add_argument("--machine", default="M3")
@@ -345,7 +435,22 @@ def main(argv=None) -> None:
         if args.schedule_cmd == "rollback":
             _run_rollback(args)
 
+    elif args.group == "recover":
+        _run_recover(args)
+
+    elif args.group == "explain":
+        _run_explain(args)
+
+    elif args.group == "benchmark":
+        if args.benchmark_cmd == "fidelity":
+            _run_benchmark(args)
+
     elif args.group == "mqtt":
+        if args.mqtt_cmd == "listen":
+            from coe.agents.listener import run_listener
+
+            run_listener()
+
         if args.mqtt_cmd == "test-failure":
             import time
 

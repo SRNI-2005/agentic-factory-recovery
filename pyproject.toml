@@ -11,6 +11,10 @@ dependencies = [
     "pydantic-settings",
     "openpyxl",
     "ortools>=9.10",
+    "langgraph>=1.2.11",
+    "langchain-core>=1.6.0",
+    "langchain-openai>=1.6.0",
+    "langchain-google-genai>=4.3.5",
 ]
 
 [dependency-groups]
@@ -30,4 +34,5 @@ markers = [
     "mqtt: tests also requiring Mosquitto reachable at MQTT_HOST/MQTT_PORT",
     "benchmark: Tier 1 MK01 optimality validation (spec §11)",
     "slow: long-running integration pins excluded from the quick gate",
+    "llm: live-provider end-to-end tests (opt-in, spec §11 Tier 5)",
 ]
