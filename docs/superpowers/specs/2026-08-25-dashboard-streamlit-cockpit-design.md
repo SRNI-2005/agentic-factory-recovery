@@ -16,7 +16,8 @@ Non-goals: production hardening (auth, TLS, multi-tenant), replacing the CLI, an
 - **Built before P4/P5** so documentation screenshots exist as those phases develop. Benchmark page grows comparison tables when P4/P5 land.
 - **Fork-on-edit:** `factory_demo_01` is a pristine, read-only template. Every mutation — including Tier 1 structural edits — happens on an automatic fork (`factory_demo_01@<8hex>` or user-named), lineage recorded in provenance tables. Template byte-reproducibility pins (demo_scenario fixture, P4 extractor determinism, fidelity corpus) are never violated.
 - **Honest infeasibility:** users may create broken schedules; the UI reports solver statuses verbatim (`INFEASIBLE` red with explanation, `UNKNOWN` amber as budget-starved, never mislabeled).
-- **Excel schedule upload deferred** to post-P5 (net-new parser domain work, no demo value lost).
+- **Interaction model — uploads over forms:** bulk configuration happens by downloading shipped template files (CSV/xlsx), filling them in, and uploading. A validation-first parser rejects malformed input at upload time with row-level messages; only clean data reaches a fork; CP-SAT alone judges feasibility and the LLM explains verdicts. Event-style actions stay as buttons (machine toggle, absence, suspend) and chat stays the recovery trigger — nobody fills a spreadsheet mid-demo to turn off a machine.
+- This upload mechanism dissolves the earlier forms-cost argument: leaf value edits (speed matrices, setup times, availability windows) become cheap to expose and are **in scope on forks**. Only operation resequencing and provenance surgery remain excluded.
 
 ## 3. Architecture
 
@@ -25,13 +26,23 @@ coe/dashboard/
 ├── app.py          # entrypoint, page config, sidebar (instance selector, fork badge)
 ├── pages/
 │   ├── cockpit.py      # chat recovery + live decision feed + schedule animation
-│   ├── configure.py    # schedule / materials / workers / machines / jobs views + edits
+│   ├── configure.py    # read-only views + per-domain template download/upload
 │   ├── runs.py         # recovery run history inspector
 │   └── benchmarks.py   # fidelity charts (+ CP-SAT vs QAOA tables after P4/P5)
 ├── data.py         # plain query/loader functions (explicit ORDER BY everywhere)
 ├── actions.py      # thin wrappers calling existing service functions (CLI parity)
 └── fork.py         # instance fork service: copies all instance-scoped rows atomically
+
+coe/uploads/         # not dashboard-private; usable from CLI later
+├── templates/       # shipped fill-in files: jobs.csv, alternatives.csv, materials.csv,
+│                    #   receipts.csv, availability.csv, speeds.csv, setups.csv, bom.csv
+├── parser.py        # schema/integrity validation → row-level report or clean records
+└── applier.py       # fork-then-apply transactional writer
 ```
+
+Upload flow (two-phase, mirroring existing importer discipline):
+1. **Validate (dry run):** column presence, types, integer minutes, non-negative constraints, FK existence (unknown SKU/job/machine names), duplicate keys. Output: row-level error report — nothing written.
+2. **Apply:** fork-on-edit first (if target is a template), then one transaction writes all records; any failure rolls back whole file.
 
 - Launch: `uv run python -m coe.cli dashboard` (wraps `streamlit run coe/dashboard/app.py`). New deps: `streamlit`, `plotly`.
 - Views open read-only SQLAlchemy sessions over existing models; every query scoped by sidebar-selected `instance_id` (FK discipline preserved).
@@ -53,8 +64,9 @@ coe/dashboard/
 - Live events rail: background MQTT subscriber thread (`st.cache_resource`) buffering into a deque, fragment auto-refresh ~1s.
 
 ### Configure
-Tabs: Schedule (Gantt, version picker) · Materials (stock levels, receipts form, amount edits) · Workers (assignments, availability, absence windows) · Machines (status, downtime windows) · Jobs/day view.
-- Any edit triggers fork-on-edit first; sidebar badge shows "viewing fork of factory_demo_01".
+Read-only tabs: Schedule (Gantt via `active_schedule`, version picker) · Materials · Workers · Machines · Jobs/day view — each with a **Download template** / **Upload** control pair.
+- Upload runs the two-phase flow (§3): dry-run report shown inline; on success the fork is created/updated and the badge reflects it.
+- Event actions (machine toggle, absence, suspend) live here as buttons, not in templates.
 
 ### Runs
 Every `recovery_run`: narrative, per-node wall-clock timeline, strategy rounds, gate verdicts, explain text.
@@ -69,13 +81,13 @@ All 25 instance-scoped tables fall into three tiers.
 ### Tier 1 — Problem definition (read-only on template, editable on forks via safe unit operations)
 `machines`, `machine_capabilities`, `job_families`, `operations`, `operation_machine_alternatives`, `setup_times`, `workers`, `worker_roles`, `operation_machine_worker_times`, `worker_availability_windows`, `operation_bom` — plus the provenance tables `instances`, `scenario_sources`, `instance_profiles` (read-only everywhere; rows are created only by importers, scenario builds, and forks).
 
-Editable on forks, implemented as **validated atomic unit operations** (integrity-guarded, not feasibility-policed):
+Editable on forks via template uploads, implemented as **validated atomic unit operations** (integrity-guarded at parse time, never feasibility-policed there):
 - Add/remove a whole job: job + operations + alternatives + BOM cascade as one transaction.
-- Tune `processing_time` on existing alternatives.
-- Toggle op↔machine eligibility; a toggle that would leave any operation with zero remaining alternatives is rejected with an explanatory message.
-- Adjust BOM quantities.
+- Tune `processing_time` on existing alternatives; toggle op↔machine eligibility (a toggle leaving any operation with zero remaining alternatives is rejected with an explanatory message).
+- Adjust BOM quantities; edit `materials` stock/reorder fields via `materials.csv`; insert receipts via `receipts.csv` (Tier 2 values ride the same upload pipeline).
+- **Leaf value edits:** `operation_machine_worker_times` speeds, `setup_times`, `worker_availability_windows` bounds — safe because these tables have no dependents.
 
-Individual operation resequencing and speed-matrix/capability surgery remain out of scope (high corruption risk, no demo need).
+Excluded everywhere: operation resequencing (breaks precedence-chain integrity), edits to `machines`/`workers`/`worker_roles`/`job_families`/`machine_capabilities` node rows (structural surgery deferred until a concrete need exists), provenance tables.
 
 ### Tier 2 — Situation state (user-editable, fork-gated)
 | Table | Editable |
@@ -113,27 +125,28 @@ Fork semantics for system-owned data:
 | Receipt insert | Materials reservoir insert path |
 | Suspend job | `coe/agents/catalog.py` SUSPEND_JOB semantics |
 | Chat recovery | `coe/agents/graph.py::build_graph().stream()` + `runs.py` recorder |
-| Configure edit | `fork.py`, then direct model mutation on the fork |
+| Template upload (clean) | `coe/uploads/parser → fork.py → applier`, one transaction |
+| Template upload (malformed) | Rejected at parse dry-run with row-level report; nothing written |
 
 ## 7. Error Handling
 
+- **Parse-time (upload):** missing columns, bad types, negative values, unknown names, duplicate keys → immediate row-level report ("jobs.csv row 7: deadline must be integer ≥ release_time"); file rejected whole, nothing written. Malformed data never reaches the solver.
+- **Solve-time:** capacity conflicts / impossible plans are CP-SAT's verdict alone — INFEASIBLE explained by the agent, per the honest-infeasibility decision.
 - Missing LLM key: chat disabled with env-setup pointer (pre-flight shared with CLI).
 - Solver statuses rendered verbatim: OPTIMAL/FEASIBLE green, INFEASIBLE red (+ explain output), UNKNOWN amber ("budget starved").
 - Broker unreachable: banner + retry button.
-- Integrity violations in unit ops: friendly field-level messages, never raw tracebacks.
 - Fork name collision: `@<8hex>` suffix.
 
 ## 8. Testing
 
-- `data.py` loaders and `actions.py` wrappers are plain functions → pytest under `db` marker, TDD per repo convention.
-- `fork.py`: deepest coverage (row counts, FK sweep, lineage, atomicity under failure).
+- `coe/uploads/` parser/applier: heaviest new-test surface — happy paths per template, every rejection class, atomicity (partial file never lands), fork integration. TDD per repo convention; mirrors existing importer test style.
+- `fork.py`: row counts, FK sweep, lineage, atomicity under failure.
+- `data.py` loaders and `actions.py` wrappers are plain functions → pytest under `db` marker.
 - One Streamlit `AppTest` smoke test asserting pages render against `clean_db` + `demo_scenario`.
 - No browser e2e automation; manual demo script lives in docs.
 
 ## 9. Build Milestones
 
-1. **A — Read-only cockpit:** app shell, sidebar/fork badge, all Configure tabs, Runs inspector, Benchmarks (fidelity only).
-2. **B — Actions:** machine toggle, absence, receipts form, suspend job, chat recovery (blocking stream display).
+1. **A — Read-only cockpit:** app shell, sidebar/fork badge, Configure views, Runs inspector, Benchmarks (fidelity only).
+2. **B — Configuration pipeline:** templates + parser/applier (`coe/uploads/`), upload UI with dry-run reports, event buttons (machine toggle, absence, suspend), chat recovery (blocking stream display).
 3. **C — Live polish:** decision feed streaming, schedule diff animation, live events rail.
-
-Excel upload re-evaluated after P5.
