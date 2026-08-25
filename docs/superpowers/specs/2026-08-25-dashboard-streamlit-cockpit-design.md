@@ -40,7 +40,7 @@ coe/dashboard/
 
 ### Fork service (`fork.py`)
 
-- Copies all ~25 instance-scoped tables under a new `instance_id` in one transaction; records parentage in provenance tables.
+- Copies all instance-scoped rows under a new `instance_id` in one transaction, **excluding** `telemetry_events` (fresh audit log per fork, see §5); records parentage in provenance tables.
 - Name collisions resolved with the importer `name@<8hex>` convention.
 - Deep tests required: per-table row-count invariants, FK integrity sweep, lineage assertions.
 
@@ -67,7 +67,7 @@ Fidelity metrics now; solver-comparison tables once P5 publishes them.
 All 25 instance-scoped tables fall into three tiers.
 
 ### Tier 1 — Problem definition (read-only on template, editable on forks via safe unit operations)
-`machines`, `machine_capabilities`, `job_families`, `operations`, `operation_machine_alternatives`, `setup_times`, `workers`, `worker_roles`, `operation_machine_worker_times`, `worker_availability_windows`, `operation_bom`.
+`machines`, `machine_capabilities`, `job_families`, `operations`, `operation_machine_alternatives`, `setup_times`, `workers`, `worker_roles`, `operation_machine_worker_times`, `worker_availability_windows`, `operation_bom` — plus the provenance tables `instances`, `scenario_sources`, `instance_profiles` (read-only everywhere; rows are created only by importers, scenario builds, and forks).
 
 Editable on forks, implemented as **validated atomic unit operations** (integrity-guarded, not feasibility-policed):
 - Add/remove a whole job: job + operations + alternatives + BOM cascade as one transaction.
@@ -91,9 +91,17 @@ Job removal maps to `SUSPEND_JOB` catalog semantics (`jobs.status=BLOCKED`), pre
 ### Tier 3 — System-owned (display-only)
 | Table | Writer |
 |---|---|
-| `telemetry_events` | MQTT ingestion (append-only audit log) |
+| `telemetry_events` | MQTT ingestion (append-only audit log; TimescaleDB hypertable) |
 | `schedule_versions`, `schedule_entries` | Solver committer (rollback creates versions, never edits) |
 | `recovery_runs`, `recovery_proposals`, `schedule_explanations` | LangGraph pipeline |
+
+Display surfaces:
+- The `active_schedule` view (latest non-rolled-back OPTIMAL/FEASIBLE version per instance) is the canonical source for Gantt rendering — never re-derive it in dashboard queries.
+- `recovery_runs.trigger` admits only `'CLI' | 'MQTT'`; chat-initiated recoveries record as `'CLI'`.
+
+Fork semantics for system-owned data:
+- Copied: derived situation state (`machine_downtime_windows`, `worker_absence_windows`), so the fork solves the same problem as its parent.
+- **Not copied:** `telemetry_events` (the audit log of what happened to the *original*); each fork starts a fresh telemetry history.
 
 ## 6. Action → Code Path Map
 
