@@ -356,6 +356,8 @@ Raw materials are *consumed*, not released when an operation finishes — so inv
 - **Suspension memory *(Amendment 2026-08-24)*:** jobs whose persisted `jobs.status` is `BLOCKED` are excluded from the payload entirely and listed in `blocked_operations` with reason `JOB_SUSPENDED` — a Phase 3 sacrifice survives into every future payload until something un-blocks the job. The payload's root `suspended_jobs` array (job names, sorted) carries the run's own suspensions so the committer can mirror `jobs.status = BLOCKED` in its transaction.
 - Determinism: events are emitted in payload iteration order; identical payloads build identical reservoirs.
 
+> **Amendment 2026-08-25 (user-approved): time-phased shortfall warnings.** MATERIAL_SHORTFALL additionally fires when cumulative early-released demand exceeds stock-plus-timely-receipts at some release prefix, even when totals suffice. Dead-block (MATERIAL_UNAVAILABLE) semantics unchanged; warning shape unchanged. Rationale: restores Phase 3 §4.3 step-3 DEFER ("only timing is wrong") reachability.
+
 ## 7. Material Handling *(restructured by Amendment 2026-08-24)*
 
 Three layers, in order:

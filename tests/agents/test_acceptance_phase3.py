@@ -9,10 +9,12 @@ Deviation notes (vs plan brief):
   armed BY compile), so the fake client carries one pre-compile JSON round
   plus the explain prose; the deterministic strategist itself consumes no
   client call.
-- The committing sacrifice is pinned to SUSPEND_JOB: post-amendment-third
-  evaluate_materials counts receipts into warning supply, so any payload
-  carrying MATERIAL_SHORTFALL is globally short and the DEFER branch cannot
-  produce a solver-feasible commit end-to-end.
+- The committing sacrifice is pinned to DEFER_JOB: Amendment 2026-08-25
+  made MATERIAL_SHORTFALL warnings time-phased (they fire on release-prefix
+  deficits even when totals suffice), so the mr-a world's covering receipt
+  at t=200 leaves the back-edge armed and the deterministic strategist
+  defers J-B onto the delivery (within projected_horizon) instead of
+  suspending it — P3 §4.3 step 3 "only timing is wrong" is reachable again.
 """
 import pytest
 
@@ -77,10 +79,12 @@ def test_criterion_1_factory_recovery_commits_child(demo):
     assert v.schedule_type == "RECOVERY" and v.hasp
 
 
-def test_criterion_15a_suspend_commits_protected_schedule(clean_db):
-    """Criterion 15 leg A: a shortfall-triggered run suspends the
-    lower-priority job, commits the protected schedule, and records the
-    sacrifice in schedule_explanations (§12.15)."""
+def test_criterion_15a_defer_commits_protected_schedule(clean_db):
+    """Criterion 15 leg A: a shortfall-triggered run defers the
+    lower-priority job onto the covering receipt, commits the protected
+    schedule, and records the sacrifice in schedule_explanations (§12.15).
+    Amendment 2026-08-25: time-phased warnings keep the back-edge armed
+    even though totals suffice, making the DEFER branch reachable."""
     from sqlalchemy import select
 
     from coe.agents.graph import execute_recovery
@@ -90,14 +94,14 @@ def test_criterion_15a_suspend_commits_protected_schedule(clean_db):
     from tests.agents.worlds import build_shortage_world
     from tests.fixtures.llm.fake_client import FakeLLMClient
 
-    inst = build_shortage_world(name="mr-a", receipt_at=None)
+    inst = build_shortage_world(name="mr-a", receipt_at=200)
     record = {"kind": "MATERIAL", "instance_id": inst,
               "material_sku": "MAT-X",
               "event_type": "MATERIAL_SHORTAGE", "occurred_at": 5,
               "severity": "HIGH", "narrative_excerpt": "short"}
     client = FakeLLMClient([
         '{"candidates": [], "final": true}',   # pre-compile negotiation round
-        "Suspended J-B so J-A keeps the MAT-X stock.",
+        "Deferred J-B until the MAT-X delivery so J-A keeps the stock.",
     ])
     out = execute_recovery(inst, trigger="MQTT", record=record,
                            source_message_id="mr-a-msg-1",
@@ -106,15 +110,17 @@ def test_criterion_15a_suspend_commits_protected_schedule(clean_db):
     st = out["state"]
     applied = [w for w in st.compiled_payload["warnings"]
                if w["type"] == "STRATEGY_APPLIED"]
-    assert any(x["candidate"]["type"] in ("DEFER_JOB", "SUSPEND_JOB")
-               for x in applied)
+    assert len(applied) == 1
+    assert applied[0]["candidate"]["type"] == "DEFER_JOB"
+    assert applied[0]["candidate"]["job_id"] == "J-B"
     jb = [j for j in st.compiled_payload["jobs"]
           if j["job_id"] == "J-B"][0]
-    assert st.compiled_payload["suspended_jobs"] == ["J-B"]
-    assert all(o["status"] == "BLOCKED" for o in jb["operations"])
+    assert jb["release_time"] >= 200
+    assert all(o["status"] == "PENDING" for o in jb["operations"])
     ja = [j for j in st.compiled_payload["jobs"]
           if j["job_id"] == "J-A"][0]
     assert all(o["status"] == "PENDING" for o in ja["operations"])
+    assert st.compiled_payload["suspended_jobs"] == []
     with make_engine().connect() as c:
         rows = c.execute(select(ScheduleExplanation)).scalars().all()
     assert len(rows) == 1                       # sacrifice explained (§12.15)

@@ -41,3 +41,46 @@ def test_multi_material_reports_first_dead_sku():
     blocks, _ = _run({"AAA": 0, "ZZZ": 0}, [],
                      {"O1": [{"sku": "ZZZ", "quantity": 1}, {"sku": "AAA", "quantity": 1}]})
     assert blocks["O1"]["material_sku"] == "AAA"
+
+
+# ---- Amendment 2026-08-25 (fifth): time-phased shortfall detection ----
+
+
+def test_time_phased_shortfall_warns_despite_sufficient_totals():
+    """With release_by_op, a release-prefix deficit warns even when stock
+    plus ALL receipts cover the grand total demand."""
+    blocks, warns = evaluate_materials(
+        initial_stock={"STEEL": 5},
+        receipts=[{"sku": "STEEL", "quantity": 10, "available_at": 200}],
+        bom_by_op={"O1": [{"sku": "STEEL", "quantity": 5}],
+                   "O2": [{"sku": "STEEL", "quantity": 5}]},
+        release_by_op={"O1": 0, "O2": 0})
+    assert blocks == {}
+    assert warns == [{"type": "MATERIAL_SHORTFALL", "material_sku": "STEEL",
+                      "total_supply": 15, "total_demand": 10}]
+
+
+def test_deferred_release_clears_warning():
+    """Same totals as above, but the second op releases at the receipt time:
+    every prefix is covered, so no warning fires."""
+    blocks, warns = evaluate_materials(
+        initial_stock={"STEEL": 5},
+        receipts=[{"sku": "STEEL", "quantity": 10, "available_at": 200}],
+        bom_by_op={"O1": [{"sku": "STEEL", "quantity": 5}],
+                   "O2": [{"sku": "STEEL", "quantity": 5}]},
+        release_by_op={"O1": 0, "O2": 200})
+    assert blocks == {} and warns == []
+
+
+def test_no_receipts_no_time_phased_extra():
+    """The absolute rule already covers a plain shortfall: time-phased
+    detection dedupes per SKU instead of emitting a second warning."""
+    blocks, warns = evaluate_materials(
+        initial_stock={"STEEL": 5},
+        receipts=[],
+        bom_by_op={"O1": [{"sku": "STEEL", "quantity": 6}]},
+        release_by_op={"O1": 0})
+    assert blocks == {}
+    assert len(warns) == 1
+    assert warns == [{"type": "MATERIAL_SHORTFALL", "material_sku": "STEEL",
+                      "total_supply": 5, "total_demand": 6}]

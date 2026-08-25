@@ -85,7 +85,13 @@ def build_g_world(clean_db):
 def build_shortage_world(name: str, receipt_at: int | None) -> str:
     """One machine, two single-op jobs BOTH consuming MAT-X (stock 5,
     demand 10 -> shortfall); optional covering receipt of 10 at receipt_at.
-    Active baseline v1 committed. Returns the instance name."""
+    Active baseline v1 committed. Returns the instance name.
+
+    Ops take 250 minutes each (Amendment 2026-08-25 fixture note): the
+    inventory agent's projected_horizon falls back to release+durations+1,
+    so a horizon covering t=200 requires long ops for the §4.3 step-3
+    "receipt within the horizon" DEFER gate to be reachable. Job RELEASES
+    stay 0 — they arm the time-phased prefix deficit."""
     from coe.db.models.fjsp import (
         Job,
         Machine,
@@ -118,7 +124,7 @@ def build_shortage_world(name: str, receipt_at: int | None) -> str:
         for o in (oa, ob):
             session.add(OperationMachineAlternative(
                 instance_id=iid, operation_id=o.id, machine_id=m1.id,
-                processing_time=5))
+                processing_time=250))
         mat = Material(instance_id=iid, sku="MAT-X", initial_stock=5,
                        reorder_point=None)
         session.add(mat)
@@ -140,7 +146,8 @@ def build_shortage_world(name: str, receipt_at: int | None) -> str:
                                                 "quantity": 5}],
                                  "alternatives": [
                                      {"machine_id": "M1",
-                                      "processing_time": 5, "workers": {}}],
+                                      "processing_time": 250,
+                                      "workers": {}}],
                                  "frozen": None}]}
                 for j, p, dl in (("J-A", 1, 60), ("J-B", 3, 90))]
         payload = {
@@ -161,18 +168,18 @@ def build_shortage_world(name: str, receipt_at: int | None) -> str:
             "setup_times": [], "blocked_operations": [],
             "suspended_jobs": []}
         # Baseline work sits AFTER the acceptance runs' reference clock (5)
-        # so both ops stay PENDING in the RECOVERY build and a SUSPEND_JOB
-        # sacrifice passes the catalog's suspension_has_history validator.
+        # so both ops stay PENDING in the RECOVERY build and either
+        # sacrifice candidate passes its catalog validator.
         solution = {"status": "OPTIMAL", "objective_value": 1.0,
-                    "makespan": 20, "total_tardiness": 0,
+                    "makespan": 510, "total_tardiness": 0,
                     "assignments": [
                         {"operation_id": "J-A-O1", "job_id": "J-A",
                          "machine_id": "M1", "worker_id": None, "start": 10,
-                         "end": 15, "processing_time": 5, "setup_time": 0,
+                         "end": 260, "processing_time": 250, "setup_time": 0,
                          "is_frozen": False},
                         {"operation_id": "J-B-O1", "job_id": "J-B",
-                         "machine_id": "M1", "worker_id": None, "start": 15,
-                         "end": 20, "processing_time": 5, "setup_time": 0,
+                         "machine_id": "M1", "worker_id": None, "start": 260,
+                         "end": 510, "processing_time": 250, "setup_time": 0,
                          "is_frozen": False}],
                     "solve_duration_seconds": 0.01}
         commit_solution(session, instance_row=inst, payload=payload,
