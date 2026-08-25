@@ -203,6 +203,55 @@ def _run_rollback(args) -> None:
         print(f"rolled back {rolled} -> active {active}")
 
 
+def _run_recover(args, client=None) -> None:
+    from coe.config import get_settings
+
+    s = get_settings()
+    if client is None:
+        # §9: fail fast BEFORE the graph starts (production path only;
+        # injected clients are test doubles and skip the check).
+        try:
+            from coe.agents.llm_client import require_llm_config
+
+            require_llm_config(s)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
+
+    if not args.narrative and not args.narrative_file:
+        raise SystemExit("recover requires --narrative or --narrative-file")
+    narrative = args.narrative or Path(args.narrative_file).read_text()
+
+    from coe.agents.graph import execute_recovery
+
+    w = _weight_overrides(args)   # parser parity with solve; inert until needed
+    outcome = execute_recovery(
+        args.instance, trigger="CLI", narrative=narrative,
+        reference_clock=args.at,
+        client=client,
+        lock_wait=s.recovery_lock_wait_seconds)
+    st = outcome["state"]
+    sol = st.solution or {}
+    print(f"recovery {args.instance}: status={outcome['status']} "
+          f"solver={sol.get('status')} makespan={sol.get('makespan')} "
+          f"version={st.committed_version_id} run_id={outcome['run_id']}")
+    if outcome["status"] != "COMMITTED":
+        raise SystemExit(f"recovery ended {outcome['status']}")
+
+
+def _run_explain(args, client=None) -> None:
+    from coe.agents.nodes.explain import explain_version
+
+    if client is None:
+        from coe.agents.llm_client import make_llm_client
+
+        client = make_llm_client()
+    prose = explain_version(args.instance, client=client)
+    if prose is None:
+        print("explanation unavailable (LLM failure or nothing to explain)")
+        return
+    print(prose)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coe", description="COE factory recovery system")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -261,6 +310,16 @@ def build_parser() -> argparse.ArgumentParser:
     shw.add_argument("--instance", required=True)
     rback = sch_sub.add_parser("rollback")
     rback.add_argument("--instance", required=True)
+
+    rec = sub.add_parser("recover", help="full agentic recovery graph")
+    rec.add_argument("--instance", required=True)
+    rec.add_argument("--narrative", default=None)
+    rec.add_argument("--narrative-file", default=None, dest="narrative_file")
+    rec.add_argument("--at", type=int, default=None)
+    _weight_args(rec)
+
+    ex = sub.add_parser("explain", help="explain the active schedule version")
+    ex.add_argument("--instance", required=True)
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
@@ -344,6 +403,12 @@ def main(argv=None) -> None:
             _run_show(args)
         if args.schedule_cmd == "rollback":
             _run_rollback(args)
+
+    elif args.group == "recover":
+        _run_recover(args)
+
+    elif args.group == "explain":
+        _run_explain(args)
 
     elif args.group == "mqtt":
         if args.mqtt_cmd == "test-failure":
