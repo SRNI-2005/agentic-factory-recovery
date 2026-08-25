@@ -323,6 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
+    mq_sub.add_parser("listen")
+
     tf = mq_sub.add_parser("test-failure")
     tf.add_argument("--instance", default="factory_demo_01")
     tf.add_argument("--machine", default="M3")
@@ -411,6 +413,11 @@ def main(argv=None) -> None:
         _run_explain(args)
 
     elif args.group == "mqtt":
+        if args.mqtt_cmd == "listen":
+            from coe.agents.listener import run_listener
+
+            run_listener()
+
         if args.mqtt_cmd == "test-failure":
             import time
 
