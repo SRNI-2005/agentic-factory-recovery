@@ -55,6 +55,9 @@ def test_translation_metrics_perfect_on_canned_truth(clean_db, tmp_path):
     tr = report["translation"]["aggregate"]
     assert tr["exact_match_rate"] == 1.0
     assert tr["corpus_pass_rate"] == 1.0
+    st = report["strategy"]
+    assert st["measured"] is True          # solver injected => rates real
+    assert st["non_degradation_rate"] == 1.0
     assert report["threshold_met"] is True
 
 
@@ -75,9 +78,13 @@ def test_translation_metrics_zero_on_garbage(clean_db, tmp_path):
         responses.append('{"kind":"NOPE"}')
         responses.append('{"candidates": [], "final": true}')
         responses.append("ok.")
+    # No strategy_solver injected: strategy metrics are UNMEASURED — the
+    # neutral 1.0 must be flagged, not passed off as a perfect score.
     report = run_fidelity(corpus, client=FakeLLMClient(responses),
-                          strategy_solver=_strategy_stub,
                           solve_budget_seconds=5)
     tr = report["translation"]["aggregate"]
     assert tr["corpus_pass_rate"] == 0.0
+    st = report["strategy"]
+    assert st["measured"] is False
+    assert st["non_degradation_rate"] == 1.0   # neutral default
     assert report["threshold_met"] is False

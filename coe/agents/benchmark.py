@@ -189,7 +189,8 @@ def run_fidelity(corpus_dir: Path, *, client,
     solve_budget_seconds budgets the production mini-solve leg (wired when
     a strategy_solver is composed from the CP-SAT engine; until that
     integration lands, injected solvers drive the leg and None reports the
-    neutral non-degradation default while validity stays measured).
+    neutral non-degradation default with strategy.measured=false while
+    validity stays measured).
     """
     from coe.agents.records import parse_disruption_record, \
         validate_record_fields
@@ -273,6 +274,7 @@ def run_fidelity(corpus_dir: Path, *, client,
                 nondegraded / max(compared, 1)
                 if strategy_solver is not None else 1.0,
             "baseline_infeasible": baseline_infeasible,
+            "measured": strategy_solver is not None,
         },
         "cases": sorted(case_rows, key=lambda r: r["case_id"]),
     }

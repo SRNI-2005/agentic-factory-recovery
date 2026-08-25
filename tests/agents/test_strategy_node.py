@@ -134,6 +134,26 @@ def test_llm_garbage_falls_back_empty_with_warning():
     assert any("fallback" in w for w in out.warnings)
 
 
+def test_llm_transport_failure_falls_back_not_crashes():
+    from coe.agents.nodes.strategy import run_strategy_round
+
+    class _Down:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user):
+            self.calls += 1
+            raise TimeoutError("provider timeout")
+
+    client = _Down()
+    out = run_strategy_round(_state(material_reactive=False),
+                             client=client, max_retries=2)
+    assert client.calls == 3      # every attempt consumed by transport errs
+    assert out.strategy_final is True
+    assert out.strategy_candidates == []
+    assert any("fallback" in w for w in out.warnings)
+
+
 def test_invalid_candidate_recorded_not_applied_later():
     from coe.agents.nodes.strategy import run_strategy_round
     from tests.fixtures.llm.fake_client import FakeLLMClient

@@ -123,6 +123,54 @@ def test_multi_disruption_refusal_is_retryable(demo):
     assert out.disruption_record["kind"] == "MACHINE"
 
 
+class _TransportFlakyClient:
+    """First ask dies with a provider-style transport error."""
+
+    def __init__(self, good_response):
+        self._good = good_response
+        self.calls = 0
+
+    def complete(self, *, system, user):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError("provider timeout")
+        return self._good
+
+
+def test_transport_error_is_retryable(demo):
+    from coe.agents.nodes.translate import run_translate
+    from coe.agents.state import RecoveryState
+
+    client = _TransportFlakyClient(json.dumps(GOOD_MACHINE))
+    out = run_translate(RecoveryState(instance_name="factory_demo_01",
+                                      reference_clock=30,
+                                      narrative=NARRATIVE), client=client,
+                        max_retries=2)
+    assert out.disruption_record["kind"] == "MACHINE"
+    assert client.calls == 2      # transport failure consumed one attempt
+
+
+def test_transport_exhaustion_raises_translation_failed(demo):
+    from coe.agents.nodes.translate import TranslationFailed, run_translate
+    from coe.agents.state import RecoveryState
+
+    class _Dead:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user):
+            self.calls += 1
+            raise ConnectionError("provider unreachable")
+
+    client = _Dead()
+    with pytest.raises(TranslationFailed):
+        run_translate(RecoveryState(instance_name="factory_demo_01",
+                                    reference_clock=30,
+                                    narrative=NARRATIVE), client=client,
+                      max_retries=2)
+    assert client.calls == 3      # 1 + max_retries, then aborts loudly
+
+
 def test_cli_message_id_stable():
     from coe.agents.nodes.translate import cli_message_id
 

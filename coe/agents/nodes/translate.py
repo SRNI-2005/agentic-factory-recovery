@@ -126,7 +126,12 @@ def run_translate(state: RecoveryState, *, client,
         for attempt in range(1 + retries):
             system, user = build_translate_messages(
                 state.narrative, state.instance_name, clock)
-            raw = client.complete(system=system, user=user + feedback)
+            try:
+                raw = client.complete(system=system, user=user + feedback)
+            except Exception as exc:      # client transport failure
+                feedback = (f"\n\nDelivery to the model failed: {exc}. "
+                            f"Try again.")
+                continue
             try:
                 data = _extract_json(raw)
                 if "error" in data and len(data) == 1:

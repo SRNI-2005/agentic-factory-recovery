@@ -28,22 +28,36 @@ def _failure_payload(mid="m-1"):
         "estimated_downtime": 200, "reason": "edge boom"})
 
 
-def test_failure_launches_exactly_one_run(g_world):
-    import json
+def _recording_runner(launched):
+    """Runner double for threaded dispatch: signals completion and exposes
+    its worker thread so tests can join it (daemon threads would otherwise
+    race clean_db wipes across tests)."""
+    import threading
 
+    done = threading.Event()
+    box = {}
+
+    def runner(**kw):
+        box["thread"] = threading.current_thread()
+        launched.append(kw)
+        done.set()
+
+    return runner, box, done
+
+
+def test_failure_launches_exactly_one_run(g_world):
     from coe.agents import listener
     from coe.db.session import make_engine
     from sqlalchemy import text
 
     launched = []
-
-    def runner(**kw):
-        launched.append(kw)
-        return {"status": "COMMITTED", "state": kw.get("record"), "run_id": 1}
+    runner, box, done = _recording_runner(launched)
 
     msg = _Msg("factory/g-world/machine/M2/events",
                _failure_payload().encode())
     listener.handle_event(msg, runner=runner)
+    assert done.wait(timeout=15)
+    box["thread"].join(timeout=15)
     assert len(launched) == 1
     call = launched[0]
     assert call["trigger"] == "MQTT"
@@ -92,22 +106,25 @@ def test_malformed_payload_no_run(g_world):
 
 def test_lock_waits_serialize_cascades(g_world):
     """Second trigger during a held lock waits, then runs (no drop)."""
+    import threading
     import time
 
     from coe.agents import listener
     from coe.agents.runs import InstanceRunLock
 
     started = []
+    box = {}
+    done = threading.Event()
 
-    def slow_runner(**kw):
-        started.append(time.monotonic())
+    def runner(**kw):
+        # handle_event dispatches us on a worker daemon thread; record it
+        # so the test can join instead of leaking it into later tests.
+        box["thread"] = threading.current_thread()
+        with InstanceRunLock(kw["instance_name"], wait_seconds=5):
+            started.append(time.monotonic())
+        done.set()
 
     with InstanceRunLock("g-world", wait_seconds=5):
-        def runner(**kw):
-            with InstanceRunLock(kw["instance_name"], wait_seconds=5):
-                started.append(time.monotonic())
-        import threading
-
         t = threading.Thread(
             target=listener.handle_event,
             args=(_Msg("factory/g-world/machine/M2/events",
@@ -115,5 +132,7 @@ def test_lock_waits_serialize_cascades(g_world):
             kwargs={"runner": runner})
         t.start()
         time.sleep(0.8)          # hold the lock while handler blocks
-    t.join(timeout=15)
-    assert len(started) >= 1     # serialized through, never dropped
+    t.join(timeout=15)           # handler returns; work continues off-thread
+    assert done.wait(timeout=15)  # serialized through, never dropped
+    box["thread"].join(timeout=15)
+    assert len(started) >= 1

@@ -118,6 +118,11 @@ def run_strategy_round(state: RecoveryState, *, client=None,
             try:
                 raw = client.complete(system=_SYSTEM_PROMPT,
                                       user=user + feedback)
+            except Exception as exc:      # client transport failure
+                feedback = f"\n\nDelivery failed: {exc}. Try again."
+                plan = None
+                continue
+            try:
                 parsed = _extract_json(raw)
                 if not isinstance(parsed.get("candidates"), list) \
                         or not isinstance(parsed.get("final"), bool):

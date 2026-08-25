@@ -117,9 +117,14 @@ def handle_event(msg, *, runner) -> None:
         return
 
     print(f"[listener] launching recovery for {mid} ({kind})")
-    runner(instance_name=payload["instance_id"], trigger="MQTT",
-           record=record, source_message_id=mid,
-           reference_clock=payload["occurred_at"])
+    # Dispatch off paho's network thread: 180s recoveries must never block
+    # loop_forever past keepalive. Serialization is guaranteed by the
+    # InstanceRunLock inside execute_recovery, not by call synchrony.
+    threading.Thread(
+        target=runner, daemon=True,
+        kwargs=dict(instance_name=payload["instance_id"], trigger="MQTT",
+                    record=record, source_message_id=mid,
+                    reference_clock=payload["occurred_at"])).start()
 
 
 def run_listener(runner=None) -> None:
@@ -130,7 +135,10 @@ def run_listener(runner=None) -> None:
 
         runner = partial(execute_recovery)
     s = get_settings()
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    # clean_session=False: unacked QoS1 messages survive reconnects instead
+    # of being discarded by the broker on session reset.
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                         clean_session=False)
 
     def _on_message(_c, _u, msg):
         try:
