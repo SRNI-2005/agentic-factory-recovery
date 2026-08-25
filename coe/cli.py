@@ -252,6 +252,28 @@ def _run_explain(args, client=None) -> None:
     print(prose)
 
 
+def _run_benchmark(args, client=None) -> None:
+    from coe.config import get_settings
+
+    if client is None:
+        from coe.agents.llm_client import make_llm_client
+
+        client = make_llm_client()
+    from coe.agents.benchmark import run_fidelity, write_report
+
+    s = get_settings()
+    seed = args.seed if args.seed is not None else s.default_seed
+    report = run_fidelity(Path(args.corpus), client=client,
+                          solve_budget_seconds=s.solver_time_limit_seconds)
+    write_report(report, Path("benchmark_report.json"))
+    agg = report["translation"]["aggregate"]
+    print(f"fidelity seed={seed} "
+          f"pass={agg['corpus_pass_rate']:.3f} "
+          f"exact={agg['exact_match_rate']:.3f} "
+          f"threshold={'MET' if report['threshold_met'] else 'MISS'} "
+          "-> benchmark_report.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coe", description="COE factory recovery system")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -320,6 +342,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     ex = sub.add_parser("explain", help="explain the active schedule version")
     ex.add_argument("--instance", required=True)
+
+    bm = sub.add_parser("benchmark",
+                        help="fidelity benchmarks over synthetic corpora")
+    bm_sub = bm.add_subparsers(dest="benchmark_cmd", required=True)
+    bf = bm_sub.add_parser("fidelity")
+    bf.add_argument("--corpus", required=True)
+    bf.add_argument("--seed", type=int, default=None)
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
@@ -411,6 +440,10 @@ def main(argv=None) -> None:
 
     elif args.group == "explain":
         _run_explain(args)
+
+    elif args.group == "benchmark":
+        if args.benchmark_cmd == "fidelity":
+            _run_benchmark(args)
 
     elif args.group == "mqtt":
         if args.mqtt_cmd == "listen":
