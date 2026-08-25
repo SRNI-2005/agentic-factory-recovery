@@ -106,6 +106,7 @@ def run_strategy_round(state: RecoveryState, *, client=None,
     if state.material_reactive:
         plan = material_reactive_plan(state)
         source = "deterministic"
+        raw_candidates = plan["candidates"]
     elif client is not None:
         user = json.dumps({"instance": state.instance_name,
                            "db_facts": state.db_facts,
