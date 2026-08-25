@@ -1,6 +1,8 @@
 # Streamlit Cockpit Dashboard Design
 
-**Status:** Approved
+> **SUPERSEDED 2026-08-26** by `2026-08-26-react-fastapi-cockpit-design.md` (stack pivot after Playwright MCP changed verification economics; data model, fork semantics, workbook pipeline, and validation boundary carry forward verbatim).
+
+**Status:** Approved → Superseded
 **Date:** 2026-08-25
 **Phase:** Post-P3 net-new scope (frontend); precedes and runs alongside P4/P5
 

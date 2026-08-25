@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **SUPERSEDED 2026-08-26** by `2026-08-26-react-cockpit-implementation-plan.md`. Tasks A3 (fork), B7–B9 (workbook), C14 (streaming), and diff logic survive as backend tasks; all Streamlit render-layer tasks are replaced.
+
 **Goal:** A Streamlit multipage cockpit over the existing COE recovery system — read-only views, workbook-driven configuration edits on auto-forked instances, event buttons publishing real MQTT disruptions, and a chat-driven LangGraph recovery with live decision feed.
 
 **Architecture:** Pure-Python Streamlit app importing `coe.*` services directly (no API layer). Views are read-only SQLAlchemy queries scoped by sidebar-selected `instance_id`. Mutations flow through three existing mechanisms only: MQTT ingestion (events), `coe/parsers/workbook.py` importer (bulk config → derived instance), and `execute_recovery()` / its streaming variant (chat). Spec: `docs/superpowers/specs/2026-08-25-dashboard-streamlit-cockpit-design.md`.
