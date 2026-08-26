@@ -362,7 +362,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.0" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "streamlit", specifier = ">=1.45" },
+    { name = "streamlit", specifier = ">=1.62" },
 ]
 
 [package.metadata.requires-dev]
