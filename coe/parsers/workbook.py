@@ -171,10 +171,24 @@ def load_rows(data: bytes) -> dict[str, list[dict]]:
     return out
 
 
+def _require_str(sheet: str, row: dict, col: str, errors: list[dict]) -> str | None:
+    """Return value if non-empty string, else append row-level error."""
+    raw = row.get(col)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        errors.append({"sheet": sheet, "row": row["_row"],
+                       "message": f"'{col}' is required"})
+        return None
+    return raw
+
+
 def _as_int(sheet: str, row: dict, col: str, errors: list[dict],
-            *, positive: bool = False, nonneg: bool = True) -> int | None:
+             *, positive: bool = False, nonneg: bool = True,
+             required: bool = False) -> int | None:
     raw = row.get(col)
     if raw is None:
+        if required:
+            errors.append({"sheet": sheet, "row": row["_row"],
+                           "message": f"'{col}' is required"})
         return None
     try:
         val = int(raw)
@@ -238,9 +252,9 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
         if fam is not None and fam not in fam_names:
             errors.append({"sheet": "Jobs", "row": r["_row"],
                            "message": f"unknown family '{fam}'"})
-        _as_int("Jobs", r, "release_time", errors)
+        _as_int("Jobs", r, "release_time", errors, required=True)
         _as_int("Jobs", r, "deadline", errors)
-        pr = _as_int("Jobs", r, "priority", errors)
+        pr = _as_int("Jobs", r, "priority", errors, required=True)
         if pr is not None and pr < 1:
             errors.append({"sheet": "Jobs", "row": r["_row"],
                            "message": f"priority must be >= 1, got {pr}"})
@@ -248,9 +262,11 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
     alt_keys: set[tuple] = set()
     seen_alt: set[tuple] = set()
     for r in rows["Alternatives"]:
-        j, sq, m = r.get("job"), _as_int("Alternatives", r, "op_sequence",
-                                         errors), r.get("machine")
-        pt = _as_int("Alternatives", r, "processing_time", errors)
+        j = _require_str("Alternatives", r, "job", errors)
+        sq = _as_int("Alternatives", r, "op_sequence", errors, required=True)
+        m = _require_str("Alternatives", r, "machine", errors)
+        pt = _as_int("Alternatives", r, "processing_time", errors,
+                      required=True)
         key = (j, sq, m)
         if key in seen_alt:
             errors.append({"sheet": "Alternatives", "row": r["_row"],
@@ -266,10 +282,11 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
 
     seen_speed: set[tuple] = set()
     for r in rows["Speeds"]:
-        j = r.get("job")
-        sq = _as_int("Speeds", r, "op_sequence", errors)
-        m, w = r.get("machine"), r.get("worker")
-        _as_int("Speeds", r, "processing_time", errors)
+        j = _require_str("Speeds", r, "job", errors)
+        sq = _as_int("Speeds", r, "op_sequence", errors, required=True)
+        m = _require_str("Speeds", r, "machine", errors)
+        w = _require_str("Speeds", r, "worker", errors)
+        _as_int("Speeds", r, "processing_time", errors, required=True)
         key = (j, sq, m, w)
         if key in seen_speed:
             errors.append({"sheet": "Speeds", "row": r["_row"],
@@ -288,12 +305,13 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
 
     seen_setup: set[tuple] = set()
     for r in rows["Setups"]:
-        m = r.get("machine")
+        m = _require_str("Setups", r, "machine", errors)
         ff, tt = r.get("from_family"), r.get("to_family")
         if m is not None and m not in mach_names:
             errors.append({"sheet": "Setups", "row": r["_row"],
                            "message": f"unknown machine '{m}'"})
-        _as_int("Setups", r, "setup_duration", errors, positive=True)
+        _as_int("Setups", r, "setup_duration", errors, positive=True,
+                required=True)
         for fname, label in ((ff, "from_family"), (tt, "to_family")):
             if fname is not None and fname not in fam_names:
                 errors.append({"sheet": "Setups", "row": r["_row"],
@@ -306,8 +324,9 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
 
     seen_sku: set[str] = set()
     for r in rows["Materials"]:
-        sku = r.get("sku")
-        _as_int("Materials", r, "initial_stock", errors, nonneg=True)
+        sku = _require_str("Materials", r, "sku", errors)
+        _as_int("Materials", r, "initial_stock", errors, nonneg=True,
+                required=True)
         _as_int("Materials", r, "reorder_point", errors)
         if sku in seen_sku:
             errors.append({"sheet": "Materials", "row": r["_row"],
@@ -315,21 +334,26 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
         seen_sku.add(sku or "")
 
     for r in rows["Receipts"]:
-        if (r.get("sku") not in sku_names
-                and r.get("sku") not in seen_sku):
+        sku = _require_str("Receipts", r, "sku", errors)
+        if (sku is not None
+                and sku not in sku_names and sku not in seen_sku):
             errors.append({"sheet": "Receipts", "row": r["_row"],
                            "message":
-                           f"unknown material '{r.get('sku')}' — "
+                           f"unknown material '{sku}' — "
                            "define it under Materials"})
-        q = _as_int("Receipts", r, "quantity", errors, positive=True)
-        _as_int("Receipts", r, "available_at", errors)
+        _as_int("Receipts", r, "quantity", errors, positive=True,
+                required=True)
+        _as_int("Receipts", r, "available_at", errors, required=True)
 
     for r in rows["Availability"]:
-        if r.get("worker") not in work_names:
+        w = _require_str("Availability", r, "worker", errors)
+        if w is not None and w not in work_names:
             errors.append({"sheet": "Availability", "row": r["_row"],
-                           "message": f"unknown worker '{r.get('worker')}'"})
-        a = _as_int("Availability", r, "available_from", errors)
-        b = _as_int("Availability", r, "available_until", errors)
+                           "message": f"unknown worker '{w}'"})
+        a = _as_int("Availability", r, "available_from", errors,
+                     required=True)
+        b = _as_int("Availability", r, "available_until", errors,
+                     required=True)
         if a is not None and b is not None and b <= a:
             errors.append({"sheet": "Availability", "row": r["_row"],
                            "message":
@@ -337,12 +361,14 @@ def validate_workbook(data: bytes, session: Session, parent) -> list[dict]:
                            f"available_from ({a})"})
 
     for r in rows["BOM"]:
-        j = r.get("job")
-        sq = _as_int("BOM", r, "op_sequence", errors)
-        _as_int("BOM", r, "quantity_required", errors, positive=True)
-        if r.get("sku") not in sku_names and r.get("sku") not in seen_sku:
+        j = _require_str("BOM", r, "job", errors)
+        sq = _as_int("BOM", r, "op_sequence", errors, required=True)
+        _as_int("BOM", r, "quantity_required", errors, positive=True,
+                required=True)
+        sku = _require_str("BOM", r, "sku", errors)
+        if sku is not None and sku not in sku_names and sku not in seen_sku:
             errors.append({"sheet": "BOM", "row": r["_row"],
-                           "message": f"unknown material '{r.get('sku')}'"})
+                           "message": f"unknown material '{sku}'"})
         if (j, sq) not in alt_keys:
             errors.append({"sheet": "BOM", "row": r["_row"],
                            "message":

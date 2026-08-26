@@ -20,8 +20,11 @@ def snapshot() -> list[dict]:
 
 def _on_message(client, userdata, msg):  # noqa: ANN001
     try:
-        evt = json.loads(msg.payload)
-    except (json.JSONDecodeError, TypeError):
+        raw = msg.payload
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        evt = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
         return
     entry = {
         "topic": msg.topic,
@@ -68,7 +71,7 @@ def _loop(host: str, port: int, topic: str) -> None:
             client.connect(host, port)
             client.subscribe(topic)
             client.loop_forever()
-        except OSError:
+        except Exception:  # noqa: BLE001
             time.sleep(2)
 
 

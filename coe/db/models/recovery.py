@@ -14,7 +14,8 @@ class RecoveryRun(Base):
         CheckConstraint("trigger IN ('CLI','MQTT')", name="run_trigger"),
         CheckConstraint(
             "status IN ('TRANSLATION_FAILED','SOLVE_INFEASIBLE',"
-            "'GATE_FAILED','VERIFIER_ROLLBACK','COMMITTED')",
+            "'GATE_FAILED','VERIFIER_ROLLBACK','COMMITTED',"
+            "'STREAMING_ERROR')",
             name="run_status"),
     )
 

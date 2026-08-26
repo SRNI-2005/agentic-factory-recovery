@@ -20,7 +20,7 @@ from coe.agents.nodes.investigate import (
 from coe.agents.nodes.manager import run_manager_compile
 from coe.agents.nodes.strategy import run_strategy_round
 from coe.agents.nodes.translate import TranslationFailed, run_translate
-from coe.agents.runs import InstanceRunLock, record_run, write_proposals
+from coe.agents.runs import InstanceRunLock, RunLockTimeout, record_run, write_proposals
 from coe.agents.safety import run_gate, verify_commit
 from coe.agents.state import RecoveryState
 from coe.config import get_settings
@@ -263,6 +263,14 @@ def execute_recovery(instance_name: str, *, trigger: str,
                        "validation_error": exc.error}
         if source_message_id is not None:
             record_json["message_id"] = source_message_id   # §3.4 dedup key
+    except RunLockTimeout:
+        raise  # lock contention must propagate to caller
+    except Exception as exc:
+        final_state = initial
+        status = "STREAMING_ERROR"
+        record_json = {"error": f"{type(exc).__name__}: {exc}"}
+        if source_message_id is not None:
+            record_json["message_id"] = source_message_id
     else:
         status = _terminal_status(final_state)
 
@@ -335,6 +343,21 @@ def execute_recovery_streaming(instance_name: str, *, trigger: str,
                        "validation_error": exc.error}
         if source_message_id is not None:
             record_json["message_id"] = source_message_id   # §3.4 dedup key
+    except RunLockTimeout:
+        raise  # lock contention must propagate to caller
+    except Exception as exc:
+        final_state = initial
+        status = "STREAMING_ERROR"
+        record_json = {"error": f"{type(exc).__name__}: {exc}"}
+        if source_message_id is not None:
+            record_json["message_id"] = source_message_id
+        run_id = record_run(
+            instance_name, trigger=trigger, status=status,
+            disruption_record_json=record_json, started_at=started,
+            finished_at=_time.time(),
+            final_status_version_id=None)
+        yield {"status": status, "state": str(exc), "run_id": run_id}
+        return
     else:
         status = _terminal_status(final_state)
 
