@@ -1,6 +1,11 @@
 # React + FastAPI Recovery Cockpit Design
 
-**Status:** Approved
+> **SUPERSEDED 2026-08-26 (same day)** by stack revert to Streamlit — see
+> `2026-08-26-stack-revert-decision.md`. The shared service layer (`coe/services/`)
+> and workbook pipeline survive unchanged; render + transport layers were removed
+> (commits `3810031`, `258e899`). Successor spec: `2026-08-25-dashboard-streamlit-cockpit-design.md` (reinstated).
+
+**Status:** Approved → Superseded
 **Date:** 2026-08-26
 **Phase:** Post-P3 net-new scope (frontend); precedes and runs alongside P4/P5
 **Supersedes:** `2026-08-25-dashboard-streamlit-cockpit-design.md`

@@ -185,3 +185,89 @@ def test_terminal_status_labels_verifier_rollback():
     assert _terminal_status(
         RecoveryState(**{**base, "solution": {"status": "INFEASIBLE"}})
     ) == "SOLVE_INFEASIBLE"
+
+
+def test_streaming_yields_nodes_then_outcome(g_world):
+    from coe.agents.graph import execute_recovery_streaming
+
+    client = FakeLLMClient([
+        TRANSLATE_OK,                          # translate
+        '{"candidates": [], "final": true}',   # strategy round
+        "Rerouted J-A and J-B off M2.",        # explain
+    ])
+    gen = execute_recovery_streaming(
+        "g-world", trigger="CLI", narrative="boom",
+        reference_clock=30, client=client, lock_wait=5)
+    nodes = []
+    final = None
+    for item in gen:
+        if "node" in item:
+            nodes.append(item["node"])
+        else:
+            final = item
+    assert nodes, "no node boundaries streamed"
+    assert nodes[0] == "entry" and nodes[-1] == "explain_node"
+    assert final is not None and "run_id" in final
+    # recording parity with execute_recovery:
+    from sqlalchemy import text
+
+    from coe.db.session import session_scope
+    with session_scope() as s:
+        n = s.execute(text("SELECT count(*) FROM recovery_runs"),
+                      {}).scalar_one()
+    assert n == 1
+
+
+def test_streaming_accumulates_partial_chunk_updates(g_world, monkeypatch):
+    """Fix round: each chunk merges onto the PREVIOUS final_state (not a
+    reset from initial), so a langgraph-style partial dict update can never
+    silently drop fields set by earlier chunks."""
+    import coe.agents.graph as graph_mod
+    from coe.agents.graph import execute_recovery_streaming
+
+    class FakeApp:
+        def stream(self, initial, stream_mode=None):
+            assert stream_mode == "updates"
+            yield {"a": {"round_count": 2}}
+            yield {"b": {"narrative": "partial-only"}}   # PARTIAL update
+
+    monkeypatch.setattr(graph_mod, "build_graph",
+                        lambda *a, **k: FakeApp())
+    items = list(execute_recovery_streaming(
+        "g-world", trigger="CLI", narrative="boom", reference_clock=30,
+        client=object(), lock_wait=5))
+    final = items[-1]
+    assert "status" in final and "run_id" in final
+    st = final["state"]
+    assert st.round_count == 2        # earlier chunk survived the merge...
+    assert st.narrative == "partial-only"   # ...and the partial field applied
+
+
+def test_streaming_translation_failed_records_run_no_versions(g_world):
+    """Twin of test_translation_failed_records_run_no_versions for the
+    streaming entry point: same fake-client mechanism (garbage LLM output,
+    max_retries=1), exactly one TRANSLATION_FAILED run row, no new schedule
+    versions. Proposals need no assertion here — translate fails before any
+    strategy round exists, mirroring the sibling's scope."""
+    from coe.agents.graph import execute_recovery_streaming
+    from coe.db.session import make_engine
+    from sqlalchemy import text
+
+    client = FakeLLMClient(["garbage", "garbage"])
+    gen = execute_recovery_streaming(
+        "g-world", trigger="CLI", narrative="boom", reference_clock=30,
+        client=client, lock_wait=5, max_retries=1)
+    final = None
+    for item in gen:
+        if "node" not in item:
+            final = item
+    assert final is not None
+    assert final["status"] == "TRANSLATION_FAILED"
+    engine = make_engine()
+    with engine.begin() as c:
+        n_runs = c.execute(text(
+            "SELECT count(*) FROM recovery_runs WHERE status="
+            "'TRANSLATION_FAILED'")).scalar_one()
+        n_versions = c.execute(text(
+            "SELECT count(*) FROM schedule_versions")).scalar_one()
+    assert n_runs == 1 and n_versions == 1      # baseline only, nothing new
