@@ -28,6 +28,7 @@ def _make_st():
         __enter__=lambda s: s,
         __exit__=MagicMock(),
         update=MagicMock()))
+    st.empty = MagicMock(return_value=MagicMock(markdown=MagicMock()))
     st.columns = MagicMock(return_value=[MagicMock() for _ in range(3)])
     st.metric = MagicMock()
     st.subheader = MagicMock()
@@ -129,11 +130,28 @@ def test_render_committed_recovery():
     mock_state.explanation = "Reassigned ops due to M1 failure."
     mock_result = {"status": "COMMITTED", "state": mock_state, "run_id": 3}
 
+    def _fake_streaming(*args, **kwargs):
+        yield {"node": "entry"}
+        yield {"node": "translate"}
+        yield {"node": "ingest"}
+        yield {"node": "machine_agent"}
+        yield {"node": "production_agent"}
+        yield {"node": "inventory_agent"}
+        yield {"node": "worker_agent"}
+        yield {"node": "strategy"}
+        yield {"node": "manager_compile"}
+        yield {"node": "solve_node"}
+        yield {"node": "gate_node"}
+        yield {"node": "commit_node"}
+        yield {"node": "verify_node"}
+        yield {"node": "explain_node"}
+        yield mock_result
+
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
-             patch("coe.agents.graph.execute_recovery",
-                   return_value=mock_result) as mock_exec, \
+             patch("coe.agents.graph.execute_recovery_streaming",
+                   side_effect=_fake_streaming) as mock_exec, \
              patch("sqlalchemy.orm.Session") as mock_sess_cls, \
              patch("coe.db.session.make_engine"):
             mock_sess = MagicMock()
@@ -174,11 +192,15 @@ def test_render_unknown_outcome():
                            "status": "UNKNOWN"}
     mock_result = {"status": "UNKNOWN", "state": mock_state, "run_id": 4}
 
+    def _fake_streaming(*args, **kwargs):
+        yield {"node": "entry"}
+        yield mock_result
+
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
-             patch("coe.agents.graph.execute_recovery",
-                   return_value=mock_result):
+             patch("coe.agents.graph.execute_recovery_streaming",
+                   side_effect=_fake_streaming):
             render()
 
         info_calls = [c.args[0] for c in st.info.call_args_list]
@@ -203,11 +225,15 @@ def test_render_infeasible_outcome():
                            "status": "INFEASIBLE"}
     mock_result = {"status": "INFEASIBLE", "state": mock_state, "run_id": 5}
 
+    def _fake_streaming(*args, **kwargs):
+        yield {"node": "entry"}
+        yield mock_result
+
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
-             patch("coe.agents.graph.execute_recovery",
-                   return_value=mock_result):
+             patch("coe.agents.graph.execute_recovery_streaming",
+                   side_effect=_fake_streaming):
             render()
 
         md_calls = [c.args[0] for c in st.markdown.call_args_list]
@@ -234,11 +260,15 @@ def test_render_no_explanation():
     mock_state.explanation = None
     mock_result = {"status": "COMMITTED", "state": mock_state, "run_id": 6}
 
+    def _fake_streaming(*args, **kwargs):
+        yield {"node": "entry"}
+        yield mock_result
+
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
-             patch("coe.agents.graph.execute_recovery",
-                   return_value=mock_result):
+             patch("coe.agents.graph.execute_recovery_streaming",
+                   side_effect=_fake_streaming):
             render()
 
         st.subheader.assert_not_called()
@@ -275,3 +305,97 @@ def test_outcome_text_unknown():
     text = _outcome_text("UNKNOWN", mock_state)
     assert "UNKNOWN" in text
     assert "budget-exhausted" in text
+
+
+# ---------------------------------------------------------------------------
+# C15 — node label coverage & streaming feed
+# ---------------------------------------------------------------------------
+
+def test_node_labels_cover_all_graph_nodes():
+    from coe.dashboard.pages.cockpit import _NODE_LABELS
+
+    expected = {
+        "entry", "translate", "ingest",
+        "machine_agent", "production_agent", "inventory_agent", "worker_agent",
+        "strategy", "manager_compile", "solve_node",
+        "gate_node", "commit_node", "verify_node", "explain_node",
+    }
+    assert set(_NODE_LABELS) == expected
+
+
+def test_solve_label_communicates_180s_floor():
+    from coe.dashboard.pages.cockpit import _NODE_LABELS
+
+    assert "2 min" in _NODE_LABELS["solve_node"]
+
+
+def test_streaming_feed_renders_progressive_lines():
+    """Streaming feed appends one friendly line per yielded node."""
+    from coe.dashboard.pages.cockpit import render
+
+    st = _install_st(_make_st())
+    st.session_state = {"instance": "demo"}
+    st.chat_input = MagicMock(return_value="Tool break")
+
+    mock_state = MagicMock()
+    mock_state.solution = None
+    mock_result = {"status": "COMMITTED", "state": mock_state, "run_id": 9}
+
+    def _fake_streaming(*args, **kwargs):
+        yield {"node": "entry"}
+        yield {"node": "translate"}
+        yield {"node": "solve_node"}
+        yield mock_result
+
+    empty_stub = MagicMock()
+    st.empty = MagicMock(return_value=empty_stub)
+
+    try:
+        with patch("coe.agents.llm_client.require_llm_config"), \
+             patch("coe.config.get_settings"), \
+             patch("coe.agents.graph.execute_recovery_streaming",
+                   side_effect=_fake_streaming):
+            render()
+
+        # empty().markdown called once per node (progressive accumulation)
+        assert empty_stub.markdown.call_count == 3
+        feed_texts = [c.args[0] for c in empty_stub.markdown.call_args_list]
+        # first call: 1 line
+        assert feed_texts[0].count("- ") == 1
+        # second call: 2 lines
+        assert feed_texts[1].count("- ") == 2
+        # third call: 3 lines
+        assert feed_texts[2].count("- ") == 3
+        assert "Initializing" in feed_texts[0]
+        assert "Solving schedule" in feed_texts[2]
+    finally:
+        _uninstall_st()
+
+
+def test_streaming_unknown_preserves_budget_starved_info():
+    from coe.dashboard.pages.cockpit import render
+
+    st = _install_st(_make_st())
+    st.session_state = {"instance": "demo"}
+    st.chat_input = MagicMock(return_value="Budget exhaustion")
+
+    mock_state = MagicMock()
+    mock_state.solution = {"status": "UNKNOWN"}
+    mock_result = {"status": "UNKNOWN", "state": mock_state, "run_id": 10}
+
+    def _fake_streaming(*args, **kwargs):
+        yield {"node": "entry"}
+        yield {"node": "solve_node"}
+        yield mock_result
+
+    try:
+        with patch("coe.agents.llm_client.require_llm_config"), \
+             patch("coe.config.get_settings"), \
+             patch("coe.agents.graph.execute_recovery_streaming",
+                   side_effect=_fake_streaming):
+            render()
+
+        info_calls = [c.args[0] for c in st.info.call_args_list]
+        assert any("budget-starved" in msg for msg in info_calls)
+    finally:
+        _uninstall_st()

@@ -1,7 +1,4 @@
-"""Cockpit page — narrative-driven recovery chat.
-
-Blocking synchronous path only.  Streaming (C15) lives elsewhere.
-"""
+"""Cockpit page — narrative-driven recovery chat with live decision feed."""
 from __future__ import annotations
 
 
@@ -60,15 +57,44 @@ def _render_user_bubble(text: str) -> None:
         st.markdown(text)
 
 
+_NODE_LABELS: dict[str, str] = {
+    "entry": "Initializing recovery pipeline",
+    "translate": "Translating disruption narrative",
+    "ingest": "Ingesting telemetry data",
+    "machine_agent": "Investigating machine status",
+    "production_agent": "Investigating production constraints",
+    "inventory_agent": "Investigating inventory & materials",
+    "worker_agent": "Investigating worker availability",
+    "strategy": "Formulating recovery strategy",
+    "manager_compile": "Compiling strategy for solver",
+    "solve_node": "Solving schedule (~2 min expected on factory floor)",
+    "gate_node": "Validating solution quality",
+    "commit_node": "Committing recovery schedule",
+    "verify_node": "Verifying schedule integrity",
+    "explain_node": "Generating explanation",
+}
+
+
 def _run_recovery(instance_name: str, narrative: str) -> None:
     import streamlit as st
 
-    from coe.agents.graph import execute_recovery
+    from coe.agents.graph import execute_recovery_streaming
 
     with st.status("Running recovery pipeline…", expanded=True) as status:
-        result = execute_recovery(
+        feed_lines: list[str] = []
+        feed_area = st.empty()
+
+        result = None
+        for chunk in execute_recovery_streaming(
             instance_name, trigger="CLI", narrative=narrative,
-        )
+        ):
+            if "node" in chunk:
+                label = _NODE_LABELS.get(chunk["node"], chunk["node"])
+                feed_lines.append(f"- {label}")
+                feed_area.markdown("\n".join(feed_lines))
+            else:
+                result = chunk
+
     status.update(
         label=f"Recovery finished — **{result['status']}**",
         state="complete",
