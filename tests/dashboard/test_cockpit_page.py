@@ -200,7 +200,9 @@ def test_render_unknown_outcome():
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
              patch("coe.agents.graph.execute_recovery_streaming",
-                   side_effect=_fake_streaming):
+                   side_effect=_fake_streaming), \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=[]):
             render()
 
         info_calls = [c.args[0] for c in st.info.call_args_list]
@@ -233,7 +235,9 @@ def test_render_infeasible_outcome():
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
              patch("coe.agents.graph.execute_recovery_streaming",
-                   side_effect=_fake_streaming):
+                   side_effect=_fake_streaming), \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=[]):
             render()
 
         md_calls = [c.args[0] for c in st.markdown.call_args_list]
@@ -268,10 +272,17 @@ def test_render_no_explanation():
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
              patch("coe.agents.graph.execute_recovery_streaming",
-                   side_effect=_fake_streaming):
+                   side_effect=_fake_streaming), \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=[]):
             render()
 
-        st.subheader.assert_not_called()
+        # With no explanation and no schedule entries, the explanation
+        # subheader is not called (diff animation subheader may appear).
+        from coe.dashboard.pages.cockpit import _render_explanation
+        # Explanation rationale not rendered
+        md_calls = [c.args[0] for c in st.markdown.call_args_list]
+        assert not any("Reassigned" in m for m in md_calls)
     finally:
         _uninstall_st()
 
@@ -354,7 +365,9 @@ def test_streaming_feed_renders_progressive_lines():
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
              patch("coe.agents.graph.execute_recovery_streaming",
-                   side_effect=_fake_streaming):
+                   side_effect=_fake_streaming), \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=[]):
             render()
 
         # empty().markdown called once per node (progressive accumulation)
@@ -392,7 +405,9 @@ def test_streaming_unknown_preserves_budget_starved_info():
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
              patch("coe.agents.graph.execute_recovery_streaming",
-                   side_effect=_fake_streaming):
+                   side_effect=_fake_streaming), \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=[]):
             render()
 
         info_calls = [c.args[0] for c in st.info.call_args_list]

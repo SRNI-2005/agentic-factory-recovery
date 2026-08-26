@@ -80,6 +80,9 @@ def _run_recovery(instance_name: str, narrative: str) -> None:
 
     from coe.agents.graph import execute_recovery_streaming
 
+    # Capture the active schedule BEFORE recovery runs
+    before_entries = _fetch_active_entries(instance_name)
+
     with st.status("Running recovery pipeline…", expanded=True) as status:
         feed_lines: list[str] = []
         feed_area = st.empty()
@@ -102,6 +105,10 @@ def _run_recovery(instance_name: str, narrative: str) -> None:
 
     final = result["state"]
     _render_outcome(result["status"], final)
+
+    # Schedule diff animation on COMMITTED recovery
+    if result["status"] == "COMMITTED":
+        _render_diff_animation(instance_name, before_entries)
 
     st.session_state["cockpit_messages"].append(
         {"role": "assistant", "content": _outcome_text(result["status"], final)},
@@ -164,6 +171,58 @@ def _render_explanation(state) -> None:
         if explanation is not None:
             st.subheader("Schedule Explanation")
             st.markdown(explanation.rationale)
+
+
+def _fetch_active_entries(instance_name: str) -> list[dict]:
+    """Return the active schedule entry dicts for *instance_name*, or []."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.session import make_engine
+
+    with Session(make_engine()) as session:
+        row = session.execute(
+            text("SELECT id FROM instances WHERE name = :n"),
+            {"n": instance_name},
+        ).mappings().first()
+        if row is None:
+            return []
+        instance_id: int = row["id"]
+        entries = session.execute(text(
+            "SELECT se.*, m.name AS machine_name, j.name AS job_name, "
+            "       o.sequence_number, w.name AS worker_name "
+            "FROM active_schedule asev "
+            "JOIN schedule_entries se ON se.id = asev.id "
+            "JOIN machines m ON m.id = se.machine_id "
+            "JOIN operations o ON o.id = se.operation_id "
+            "JOIN jobs j ON j.id = o.job_id "
+            "LEFT JOIN workers w ON w.id = se.worker_id "
+            "WHERE se.instance_id = :iid "
+            "ORDER BY m.name ASC, se.start_time ASC, j.name ASC, "
+            "         o.sequence_number ASC"
+        ), {"iid": instance_id}).mappings().all()
+        return [dict(e) for e in entries]
+
+
+def _render_diff_animation(instance_name: str, before_entries: list[dict]) -> None:
+    """Render the before → after schedule diff animation after a COMMIT."""
+    import time as _time
+
+    import streamlit as st
+
+    from coe.dashboard.diff import schedule_frames
+
+    after_entries = _fetch_active_entries(instance_name)
+    frames = schedule_frames(before_entries, after_entries)
+    if not frames:
+        return
+
+    st.subheader("Schedule Transition")
+    placeholder = st.empty()
+    for fig in frames:
+        placeholder.plotly_chart(fig, use_container_width=True)
+        if len(frames) > 1:
+            _time.sleep(1.2)
 
 
 def _outcome_text(status: str, state) -> str:
