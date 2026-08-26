@@ -296,11 +296,21 @@ def build_parser() -> argparse.ArgumentParser:
     gass = sources.add_parser("gass")
     gass.add_argument("--dir", default="data/raw/gass")
 
+    wb = sources.add_parser("workbook")
+    wb.add_argument("--path", required=True)
+    wb.add_argument("--name", default=None)
+
     sc = sub.add_parser("scenario")
     sc_sub = sc.add_subparsers(dest="scenario_cmd", required=True)
     sb = sc_sub.add_parser("build")
     sb.add_argument("--name", default="factory_demo_01")
     sb.add_argument("--seed", type=int, default=None)
+
+    tpl = sub.add_parser("template")
+    tpl_sub = tpl.add_subparsers(dest="template_cmd", required=True)
+    te = tpl_sub.add_parser("export")
+    te.add_argument("--instance", required=True)
+    te.add_argument("--out", default="data/templates/factory_workbook.xlsx")
 
     db = sub.add_parser("db")
     db_sub = db.add_subparsers(dest="db_cmd", required=True)
@@ -405,6 +415,42 @@ def main(argv=None) -> None:
             from coe.parsers.gass import import_gass
 
             print(f"instance id={import_gass(Path(args.dir))}")
+
+        if args.source == "workbook":
+            from coe.db.models.provenance import Instance
+            from coe.db.session import session_scope
+            from coe.parsers.workbook import (
+                WorkbookRejected,
+                apply_workbook,
+            )
+
+            data = Path(args.path).read_bytes()
+            with session_scope() as session:
+                parent = (session.query(Instance)
+                          .filter(Instance.name == "factory_demo_01")
+                          .one_or_none())
+                if parent is None:
+                    raise SystemExit(
+                        "parent instance 'factory_demo_01' not found")
+                try:
+                    fork = apply_workbook(session, parent, data,
+                                          new_name=args.name)
+                except WorkbookRejected as exc:
+                    raise SystemExit(str(exc))
+                print(f"instance name={fork.name}")
+
+    elif args.group == "template":
+        if args.template_cmd == "export":
+            from coe.db.session import session_scope
+            from coe.parsers.workbook import export_workbook
+
+            with session_scope() as session:
+                inst = _instance_or_die(session, args.instance)
+                data = export_workbook(session, inst.id)
+            out = Path(args.out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(data)
+            print(f"exported {inst.name} -> {out}")
 
     elif args.group == "scenario":
         if args.scenario_cmd == "build":
