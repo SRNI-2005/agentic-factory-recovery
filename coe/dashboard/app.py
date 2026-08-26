@@ -40,6 +40,11 @@ def main() -> None:
     if parent:
         st.sidebar.caption(f"fork of **{parent}**")
 
+    from coe.dashboard.rail import render_rail, start_rail
+
+    start_rail()
+    render_rail()
+
     pages = [
         st.Page(render_cockpit, title="Cockpit", icon="⚙️", url_path="cockpit", default=True),
         st.Page(render_configure, title="Configure", icon="🔧", url_path="configure"),
