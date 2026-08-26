@@ -1,4 +1,4 @@
-"""Configure page — five read-only tabs for schedule, materials, machines, workers, jobs."""
+"""Configure page — workbook controls above five read-only tabs."""
 from __future__ import annotations
 
 
@@ -39,6 +39,8 @@ def render() -> None:
         jobs = jobs_overview(session, instance_id)
         per_day = jobs_per_day(session, instance_id)
 
+    _render_workbook_controls(instance_name, instance_id)
+
     tab_sched, tab_mat, tab_mach, tab_work, tab_jobs = st.tabs(
         ["Schedule", "Materials", "Machines", "Workers", "Jobs/day"]
     )
@@ -48,6 +50,77 @@ def render() -> None:
     _render_machines(tab_mach, machines)
     _render_workers(tab_work, workers)
     _render_jobs_day(tab_jobs, jobs, per_day)
+
+
+# ------------------------------------------------------------------
+# Workbook controls
+# ------------------------------------------------------------------
+
+def _render_workbook_controls(instance_name: str, instance_id: int) -> None:
+    import streamlit as st
+    from coe.db.models.provenance import Instance
+    from coe.db.session import session_scope
+    from coe.parsers.workbook import (
+        WorkbookRejected,
+        apply_workbook,
+        export_workbook,
+        validate_workbook,
+    )
+    from coe.services.fork import ForkError
+
+    st.subheader("Workbook")
+
+    # --- download ---
+    with session_scope() as session:
+        xlsx_bytes = export_workbook(session, instance_id)
+    st.download_button(
+        label="Download workbook",
+        data=xlsx_bytes,
+        file_name=f"{instance_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="wb_download",
+    )
+
+    st.divider()
+
+    # --- upload ---
+    uploaded = st.file_uploader(
+        "Upload an xlsx workbook to create a new instance",
+        type=["xlsx"],
+        key="wb_upload",
+    )
+    if uploaded is not None:
+        raw = uploaded.getvalue()
+        if st.button("Validate & apply", key="wb_apply"):
+            with session_scope() as session:
+                parent = session.get(Instance, instance_id)
+                errors = validate_workbook(raw, session, parent)
+                if errors:
+                    shown = errors[:25]
+                    st.error(
+                        f"Workbook has **{len(errors)}** error(s) "
+                        f"({len(shown)} shown). Nothing was written."
+                    )
+                    st.dataframe(
+                        [
+                            {"Sheet": e["sheet"], "Row": e["row"],
+                             "Error": e["message"]}
+                            for e in shown
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    try:
+                        fork = apply_workbook(session, parent, raw)
+                    except ForkError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(
+                            f"Created instance **{fork.name}**. "
+                            "Select it in the sidebar to view it."
+                        )
+                        st.rerun()
 
 
 # ------------------------------------------------------------------
