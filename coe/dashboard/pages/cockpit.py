@@ -205,9 +205,11 @@ def _fetch_active_entries(instance_name: str) -> list[dict]:
 
 
 def _render_diff_animation(instance_name: str, before_entries: list[dict]) -> None:
-    """Render the before → after schedule diff animation after a COMMIT."""
-    import time as _time
+    """Render the before → after schedule diff animation after a COMMIT.
 
+    Uses an interactive st.slider for frame selection rather than a
+    blocking time.sleep loop.
+    """
     import streamlit as st
 
     from coe.dashboard.diff import schedule_frames
@@ -218,11 +220,10 @@ def _render_diff_animation(instance_name: str, before_entries: list[dict]) -> No
         return
 
     st.subheader("Schedule Transition")
-    placeholder = st.empty()
-    for fig in frames:
-        placeholder.plotly_chart(fig, use_container_width=True)
-        if len(frames) > 1:
-            _time.sleep(1.2)
+    st.plotly_chart(frames[-1], use_container_width=True)
+    if len(frames) > 1:
+        idx = st.slider("Recovery move", 1, len(frames), len(frames))
+        st.plotly_chart(frames[idx - 1], use_container_width=True)
 
 
 def _outcome_text(status: str, state) -> str:

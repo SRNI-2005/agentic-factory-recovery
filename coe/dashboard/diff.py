@@ -145,16 +145,19 @@ def schedule_frames(
         ghost_rows = [_to_row(before_map[k], ghost=True)
                       for k in sorted(removed_keys)]
 
-        # The transitioning operation in its AFTER position
+        # The transitioning operation: ghost→new for moved, new-only for added
         if key in moved_keys:
-            transition_row = _to_row(after_map[key])
-            label = f"After: {key[0]}/op{key[1]}"
+            transition_rows = [
+                _to_row(before_map[key], ghost=True),
+                _to_row(after_map[key]),
+            ]
+            label = f"Moved: {key[0]}/op{key[1]}"
         else:
             # Added op: not in before, show in after
-            transition_row = _to_row(after_map[key])
+            transition_rows = [_to_row(after_map[key])]
             label = f"Added: {key[0]}/op{key[1]}"
 
-        rows = base_rows + ghost_rows + [transition_row]
+        rows = base_rows + ghost_rows + transition_rows
         frames.append(_build_figure(rows, title=f"Step {idx}: {label}"))
 
     # If only removed ops (no moved/added), produce one intermediate frame

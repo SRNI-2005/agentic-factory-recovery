@@ -32,6 +32,8 @@ def _make_st():
     st.columns = MagicMock(return_value=[MagicMock() for _ in range(3)])
     st.metric = MagicMock()
     st.subheader = MagicMock()
+    st.slider = MagicMock(return_value=1)
+    st.plotly_chart = MagicMock()
     return st
 
 
@@ -152,18 +154,9 @@ def test_render_committed_recovery():
              patch("coe.config.get_settings"), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming) as mock_exec, \
-             patch("sqlalchemy.orm.Session") as mock_sess_cls, \
-             patch("coe.db.session.make_engine"):
-            mock_sess = MagicMock()
-            mock_sess_cls.return_value.__enter__ = MagicMock(return_value=mock_sess)
-            mock_sess_cls.return_value.__exit__ = MagicMock(return_value=False)
-            mock_sess.get.return_value = MagicMock(id=7)
-            mock_query = MagicMock()
-            mock_sess.query.return_value = mock_query
-            mock_query.filter.return_value.first.return_value = MagicMock(
-                rationale="Reassigned ops due to M1 failure."
-            )
-
+             patch("coe.dashboard.pages.cockpit._render_explanation"), \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=[]):
             render()
 
         mock_exec.assert_called_once_with(
@@ -412,5 +405,39 @@ def test_streaming_unknown_preserves_budget_starved_info():
 
         info_calls = [c.args[0] for c in st.info.call_args_list]
         assert any("budget-starved" in msg for msg in info_calls)
+    finally:
+        _uninstall_st()
+
+
+# ---------------------------------------------------------------------------
+# C16 review: cockpit diff animation uses slider, not time.sleep
+# ---------------------------------------------------------------------------
+
+def test_render_diff_animation_uses_slider_not_sleep():
+    """_render_diff_animation must use st.slider for interactive frame
+    selection, not a blocking time.sleep loop."""
+    from coe.dashboard.pages.cockpit import _render_diff_animation
+
+    st = _install_st(_make_st())
+    try:
+        before = [{"job_name": "J1", "sequence_number": 1,
+                    "machine_name": "M1", "start_time": 0, "end_time": 10,
+                    "worker_name": "W1"}]
+        after = [{"job_name": "J1", "sequence_number": 1,
+                   "machine_name": "M2", "start_time": 0, "end_time": 10,
+                   "worker_name": "W1"}]
+
+        slider_mock = MagicMock(return_value=2)
+        st.slider = slider_mock
+        st.plotly_chart = MagicMock()
+
+        with patch("coe.dashboard.diff.schedule_frames",
+                   return_value=["fig1", "fig2"]) as mock_frames, \
+             patch("coe.dashboard.pages.cockpit._fetch_active_entries",
+                   return_value=after):
+            _render_diff_animation("demo", before)
+
+        slider_mock.assert_called_once()
+        assert st.plotly_chart.call_count == 2
     finally:
         _uninstall_st()

@@ -152,3 +152,30 @@ def test_intermediate_frame_title_labels_operation():
     after = [_entry("J1", 1, "M2", 0, 10)]
     frames = schedule_frames(before, after)
     assert "J1/op1" in (frames[0].layout.title.text or "")
+
+
+# ---------------------------------------------------------------------------
+# C16 review: moved ops must show ghost→new (both bars) in intermediate
+# ---------------------------------------------------------------------------
+
+def test_moved_operation_shows_both_ghost_and_new_in_intermediate():
+    """Intermediate frame for a moved op must contain both the old (ghost)
+    position and the new position, matching the plan's ghost→new intent."""
+    from coe.dashboard.diff import schedule_frames
+
+    before = [
+        _entry("J1", 1, "M1", 0, 10),
+        _entry("J2", 1, "M2", 10, 30),
+    ]
+    after = [
+        _entry("J1", 1, "M3", 0, 10),  # moved from M1 to M3
+        _entry("J2", 1, "M2", 10, 30),
+    ]
+    frames = schedule_frames(before, after)
+    # 1 intermediate (moved J1/op1) + 1 final = 2 frames
+    assert len(frames) == 2
+    intermediate = frames[0]
+    # Must contain traces for both machines: M1 (ghost) and M3 (new)
+    trace_machines = {t.y[0] for t in intermediate.data}
+    assert "M1" in trace_machines, "ghost (old position) missing from intermediate"
+    assert "M3" in trace_machines, "new position missing from intermediate"
