@@ -81,11 +81,17 @@ class TestTemplateExport:
         assert out.stat().st_size > 0
         assert "factory_demo_01" in r.stdout
 
-    def test_export_default_path(self, built_demo):
-        r = _cli("template", "export", "--instance", "factory_demo_01")
-        assert r.returncode == 0, r.stderr
-        default_out = Path("data/templates/factory_workbook.xlsx")
-        assert default_out.exists()
+    def test_export_default_path(self, built_demo, tmp_path):
+        import os
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            r = _cli("template", "export", "--instance", "factory_demo_01")
+            assert r.returncode == 0, r.stderr
+            default_out = tmp_path / "data/templates/factory_workbook.xlsx"
+            assert default_out.exists()
+        finally:
+            os.chdir(cwd)
 
     def test_export_unknown_instance(self, built_demo):
         r = _cli("template", "export", "--instance", "nonexistent")
