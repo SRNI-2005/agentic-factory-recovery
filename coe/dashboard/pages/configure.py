@@ -46,10 +46,10 @@ def render() -> None:
     )
 
     _render_schedule(tab_sched, schedule_data, versions)
-    _render_materials(tab_mat, materials)
-    _render_machines(tab_mach, machines)
-    _render_workers(tab_work, workers)
-    _render_jobs_day(tab_jobs, jobs, per_day)
+    _render_materials(tab_mat, materials, instance_name)
+    _render_machines(tab_mach, machines, instance_name)
+    _render_workers(tab_work, workers, instance_name)
+    _render_jobs_day(tab_jobs, jobs, per_day, instance_name)
 
 
 # ------------------------------------------------------------------
@@ -209,8 +209,10 @@ def _render_gantt(entries):
 # Materials tab
 # ------------------------------------------------------------------
 
-def _render_materials(container, materials):
+def _render_materials(container, materials, instance_name: str):
     import streamlit as st
+
+    from coe.dashboard.actions import material_shortage_action
 
     with container:
         st.subheader("Materials")
@@ -234,13 +236,26 @@ def _render_materials(container, materials):
                         hide_index=True,
                     )
 
+        st.divider()
+        st.subheader("Material Actions")
+        sku_list = [m["sku"] for m in materials]
+        sel_sku = st.selectbox("SKU", sku_list, key="mat_action_sel")
+        if st.button("Report SHORTAGE", key="mat_shortage_btn"):
+            ok, err = material_shortage_action(instance_name, sel_sku)
+            if ok:
+                st.success(ok)
+            else:
+                st.error(err)
+
 
 # ------------------------------------------------------------------
 # Machines tab
 # ------------------------------------------------------------------
 
-def _render_machines(container, machines):
+def _render_machines(container, machines, instance_name: str):
     import streamlit as st
+
+    from coe.dashboard.actions import machine_down_action, machine_restore_action
 
     with container:
         st.subheader("Machines")
@@ -260,13 +275,35 @@ def _render_machines(container, machines):
             hide_index=True,
         )
 
+        st.divider()
+        st.subheader("Machine Actions")
+        machine_names = [m["name"] for m in machines]
+        sel_machine = st.selectbox("Machine", machine_names, key="mach_action_sel")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Mark DOWN", key="mach_down_btn"):
+                ok, err = machine_down_action(instance_name, sel_machine)
+                if ok:
+                    st.success(ok)
+                else:
+                    st.error(err)
+        with col2:
+            if st.button("Restore", key="mach_restore_btn"):
+                ok, err = machine_restore_action(instance_name, sel_machine)
+                if ok:
+                    st.success(ok)
+                else:
+                    st.error(err)
+
 
 # ------------------------------------------------------------------
 # Workers tab
 # ------------------------------------------------------------------
 
-def _render_workers(container, workers):
+def _render_workers(container, workers, instance_name: str):
     import streamlit as st
+
+    from coe.dashboard.actions import worker_absent_action, worker_return_action
 
     with container:
         st.subheader("Workers")
@@ -287,14 +324,36 @@ def _render_workers(container, workers):
             hide_index=True,
         )
 
+        st.divider()
+        st.subheader("Worker Actions")
+        worker_names = [w["name"] for w in workers]
+        sel_worker = st.selectbox("Worker", worker_names, key="wrk_action_sel")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Mark ABSENT", key="wrk_absent_btn"):
+                ok, err = worker_absent_action(instance_name, sel_worker)
+                if ok:
+                    st.success(ok)
+                else:
+                    st.error(err)
+        with col2:
+            if st.button("Return", key="wrk_return_btn"):
+                ok, err = worker_return_action(instance_name, sel_worker)
+                if ok:
+                    st.success(ok)
+                else:
+                    st.error(err)
+
 
 # ------------------------------------------------------------------
 # Jobs/day tab
 # ------------------------------------------------------------------
 
-def _render_jobs_day(container, jobs, per_day):
+def _render_jobs_day(container, jobs, per_day, instance_name: str):
     import plotly.express as px
     import streamlit as st
+
+    from coe.dashboard.actions import resume_job_action, suspend_job_action
 
     with container:
         st.subheader("Jobs Overview")
@@ -315,6 +374,26 @@ def _render_jobs_day(container, jobs, per_day):
                 use_container_width=True,
                 hide_index=True,
             )
+
+            st.divider()
+            st.subheader("Job Actions")
+            job_names = [j["name"] for j in jobs]
+            sel_job = st.selectbox("Job", job_names, key="job_action_sel")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Suspend", key="job_suspend_btn"):
+                    ok, err = suspend_job_action(instance_name, sel_job)
+                    if ok:
+                        st.success(ok)
+                    else:
+                        st.error(err)
+            with col2:
+                if st.button("Resume", key="job_resume_btn"):
+                    ok, err = resume_job_action(instance_name, sel_job)
+                    if ok:
+                        st.success(ok)
+                    else:
+                        st.error(err)
         else:
             st.info("No jobs configured.")
 
