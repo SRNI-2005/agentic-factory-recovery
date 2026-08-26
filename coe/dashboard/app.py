@@ -1,11 +1,14 @@
 """Streamlit cockpit entrypoint."""
-import importlib
 
 
 def main() -> None:
     import streamlit as st
 
     from coe.dashboard.data import list_instances
+    from coe.dashboard.pages.benchmarks import render as render_benchmarks
+    from coe.dashboard.pages.cockpit import render as render_cockpit
+    from coe.dashboard.pages.configure import render as render_configure
+    from coe.dashboard.pages.runs import render as render_runs
     from coe.db.session import session_scope
 
     st.set_page_config(
@@ -37,22 +40,14 @@ def main() -> None:
     if parent:
         st.sidebar.caption(f"fork of **{parent}**")
 
-    pages = {
-        "Cockpit": "cockpit",
-        "Configure": "configure",
-        "Runs": "runs",
-        "Benchmarks": "benchmarks",
-    }
-    choice = st.sidebar.radio("Pages", list(pages), key="nav")
-    try:
-        module = importlib.import_module(f"coe.dashboard.pages.{pages[choice]}")
-    except ModuleNotFoundError:
-        st.info(f"{choice} page arrives in a later task.")
-        return
-    st.title(choice)
-    render = getattr(module, "render", None)
-    if render is not None:
-        render()
+    pages = [
+        st.Page(render_cockpit, title="Cockpit", icon="⚙️", default=True),
+        st.Page(render_configure, title="Configure", icon="🔧"),
+        st.Page(render_runs, title="Runs", icon="📊"),
+        st.Page(render_benchmarks, title="Benchmarks", icon="📈"),
+    ]
+    page = st.navigation(pages)
+    page.run()
 
 
 if __name__ == "__main__":
