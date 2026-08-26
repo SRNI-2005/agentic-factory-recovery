@@ -41,10 +41,10 @@ def main() -> None:
         st.sidebar.caption(f"fork of **{parent}**")
 
     pages = [
-        st.Page(render_cockpit, title="Cockpit", icon="⚙️", default=True),
-        st.Page(render_configure, title="Configure", icon="🔧"),
-        st.Page(render_runs, title="Runs", icon="📊"),
-        st.Page(render_benchmarks, title="Benchmarks", icon="📈"),
+        st.Page(render_cockpit, title="Cockpit", icon="⚙️", url_path="cockpit", default=True),
+        st.Page(render_configure, title="Configure", icon="🔧", url_path="configure"),
+        st.Page(render_runs, title="Runs", icon="📊", url_path="runs"),
+        st.Page(render_benchmarks, title="Benchmarks", icon="📈", url_path="benchmarks"),
     ]
     page = st.navigation(pages)
     page.run()

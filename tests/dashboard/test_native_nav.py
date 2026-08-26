@@ -62,3 +62,20 @@ def test_instance_selectbox_before_navigation():
 def test_navigation_run_called():
     """The returned page object must have .run() called."""
     assert ".run()" in _source, "Page.run() must be called after st.navigation"
+
+
+def test_each_page_has_unique_url_path():
+    """Every st.Page(callable) must carry an explicit url_path to avoid
+    pathname collisions when all callables share __name__ == 'render'.
+
+    Without this, Streamlit infers url_path from callable.__name__ and
+    all four pages get url_path='render', producing blank pages on
+    navigation.
+    """
+    # Extract every st.Page(...) call via regex (handles multi-line)
+    page_calls = re.findall(r"st\.Page\(([^)]+)\)", _source, re.DOTALL)
+    assert len(page_calls) >= 4, f"Expected ≥4 st.Page calls, found {len(page_calls)}"
+    for call in page_calls:
+        assert "url_path=" in call, (
+            f"st.Page call missing explicit url_path:\n  st.Page({call.strip()})"
+        )
