@@ -39,6 +39,20 @@ def demo_scenario(clean_db):
 
 
 @pytest.fixture()
+def session():
+    """Plain SQLAlchemy session over the current DB state; never commits."""
+    from sqlalchemy.orm import sessionmaker
+
+    from coe.db.session import make_engine
+
+    s = sessionmaker(bind=make_engine(), expire_on_commit=False)()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+@pytest.fixture()
 def fake_llm():
     """Factory fixture: fake_llm(["resp", ...]) or fake_llm({key: resp})."""
     from tests.fixtures.llm.fake_client import FakeLLMClient

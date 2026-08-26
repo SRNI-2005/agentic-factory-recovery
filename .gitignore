@@ -8,3 +8,10 @@ __pycache__/
 # agent tooling
 .opencode/
 .playwright-mcp/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dev-dist/
+.screenshots/
+benchmark_report.json

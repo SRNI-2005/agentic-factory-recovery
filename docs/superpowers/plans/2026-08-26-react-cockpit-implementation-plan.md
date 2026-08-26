@@ -2,6 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **SUPERSEDED 2026-08-26 (same day)** by stack revert to Streamlit — see
+> `specs/2026-08-26-stack-revert-decision.md`. Executed through Task F8 + milestone R1;
+> surviving backend work (S1–S5 = `coe/services/`, workbook parser, streaming twin)
+> carries into the reinstated Streamlit plan.
+
 **Goal:** React+TypeScript cockpit over a FastAPI service layer wrapping the existing COE recovery system — SVG Gantt with animated schedule diffs, workbook-driven configuration on auto-forked instances, MQTT disruption buttons, and chat-driven LangGraph recovery streamed live via SSE.
 
 **Architecture:** One shared service layer (`coe/services/`) consumed by both FastAPI routers and the CLI; recovery runs execute in background tasks publishing node-boundary events to in-memory topics; the frontend is a Vite SPA talking REST + SSE. All domain rules (fork-on-edit, workbook validation tiers, action semantics) are inherited unchanged from `docs/superpowers/specs/2026-08-26-react-fastapi-cockpit-design.md`.

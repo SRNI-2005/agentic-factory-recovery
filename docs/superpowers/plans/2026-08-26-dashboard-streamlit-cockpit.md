@@ -2,7 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **SUPERSEDED 2026-08-26** by `2026-08-26-react-cockpit-implementation-plan.md`. Tasks A3 (fork), B7–B9 (workbook), C14 (streaming), and diff logic survive as backend tasks; all Streamlit render-layer tasks are replaced.
+> **REINSTATED 2026-08-26** after same-day React+FastAPI revert; see `specs/2026-08-26-stack-revert-decision.md`. The plan remains the execution source for the Streamlit cockpit, with the adaptations below.
+
+## Current-Tree Adaptations
+
+- **A2:** implement only the dashboard-facing adapter surface over the already-tested `coe/services/` modules (`instances`, `schedules`, `configure`, `actions`, and `recovery`); do not duplicate service queries.
+- **A3:** complete as `coe/services/fork.py`; skip the old `coe/dashboard/fork.py` implementation and port its relevant tests only if dashboard-specific coverage is missing.
+- **B7–B9:** complete as `coe/parsers/workbook.py`; build the UI against its existing export/validate/apply interfaces.
+- **C14:** complete as the existing streaming recovery twin in `coe/agents/graph.py` (commit `b23f353`); verify the Streamlit caller against that interface.
+- **B12:** dashboard actions are thin calls to `coe/services/actions.py`, not a second MQTT implementation.
+- **Verification:** add AppTest page smoke tests and one AppTest full-journey test. Do not add browser E2E or Playwright checkpoints.
 
 **Goal:** A Streamlit multipage cockpit over the existing COE recovery system — read-only views, workbook-driven configuration edits on auto-forked instances, event buttons publishing real MQTT disruptions, and a chat-driven LangGraph recovery with live decision feed.
 

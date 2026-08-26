@@ -1,8 +1,13 @@
 # Streamlit Cockpit Dashboard Design
 
-> **SUPERSEDED 2026-08-26** by `2026-08-26-react-fastapi-cockpit-design.md` (stack pivot after Playwright MCP changed verification economics; data model, fork semantics, workbook pipeline, and validation boundary carry forward verbatim).
+> **REINSTATED 2026-08-26** — the same-day React+FastAPI pivot was reverted; see
+> `2026-08-26-stack-revert-decision.md` for evidence and ruling. Amendments to this
+> spec: pages/data loaders call the already-built `coe/services/` layer (built during
+> the reverted pivot, kept as pure Python) instead of re-implementing `data.py` from
+> scratch; testing adds AppTest page-smoke + full-journey layers (no browser e2e,
+> unchanged).
 
-**Status:** Approved → Superseded
+**Status:** Approved → Superseded → Reinstated (amended)
 **Date:** 2026-08-25
 **Phase:** Post-P3 net-new scope (frontend); precedes and runs alongside P4/P5
 

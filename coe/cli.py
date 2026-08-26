@@ -370,6 +370,9 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--sku", default="MAT-001")
     ts.add_argument("--at", type=int, default=300)
 
+    dash = sub.add_parser("dashboard", help="launch the Streamlit cockpit")
+    dash.add_argument("--port", type=int, default=8501)
+
     return parser
 
 
@@ -563,6 +566,17 @@ def main(argv=None) -> None:
                 raise SystemExit("FAIL: shortage not ingested within 5s")
             finally:
                 handle.stop()
+
+    elif args.group == "dashboard":
+        import sys
+
+        from streamlit.web import cli as stcli
+
+        sys.argv = ["streamlit", "run", "coe/dashboard/app.py",
+                    "--server.port", str(args.port),
+                    "--server.address", "127.0.0.1",
+                    "--server.headless", "true"]
+        sys.exit(stcli.main())
 
 
 if __name__ == "__main__":

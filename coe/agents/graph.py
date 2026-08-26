@@ -281,3 +281,75 @@ def execute_recovery(instance_name: str, *, trigger: str,
     if verdicts:
         write_proposals(instance_name, run_id, verdicts)
     return {"status": status, "state": final_state, "run_id": run_id}
+
+
+def execute_recovery_streaming(instance_name: str, *, trigger: str,
+                               narrative: str | None = None,
+                               record: dict | None = None,
+                               source_message_id: str | None = None,
+                               reference_clock: int | None = None,
+                               client=None, lock_wait: float | None = None,
+                               max_retries: int | None = None):
+    """Streaming twin of execute_recovery (dashboard design §4 Cockpit).
+
+    Yields {'node': <name>} at each LangGraph update boundary, then a
+    single terminal dict with the same shape execute_recovery returns.
+    Recording semantics are identical: exactly one recovery_runs row,
+    proposals flushed even on failure paths.
+    """
+    import time as _time
+
+    started = _time.time()
+    if client is None:
+        from coe.agents.llm_client import make_llm_client
+
+        client = make_llm_client()
+
+    initial = RecoveryState(
+        instance_name=instance_name, trigger=trigger,
+        narrative=narrative or "", disruption_record=record,
+        source_message_id=source_message_id,
+        reference_clock=reference_clock)
+
+    app = build_graph(client, max_retries=max_retries)
+    status = "COMMITTED"
+    final_state = initial
+    try:
+        with InstanceRunLock(instance_name, wait_seconds=lock_wait):
+            for chunk in app.stream(initial, stream_mode="updates"):
+                for node in chunk:
+                    yield {"node": node}
+                # Accumulate onto the previous final_state instead of
+                # resetting from initial: nodes currently return full
+                # RecoveryStates, but if one ever returns a langgraph-style
+                # partial dict, fields set by earlier chunks must survive.
+                merged = final_state
+                for node, upd in chunk.items():
+                    if upd is not None:
+                        merged = merged.model_copy(update=dict(upd))
+                final_state = merged
+    except TranslationFailed as exc:
+        final_state = initial
+        status = "TRANSLATION_FAILED"
+        record_json = {"narrative": exc.narrative,
+                       "validation_error": exc.error}
+        if source_message_id is not None:
+            record_json["message_id"] = source_message_id   # §3.4 dedup key
+    else:
+        status = _terminal_status(final_state)
+
+        rec = final_state.disruption_record or {}
+        record_json = dict(rec)
+        if source_message_id is not None:
+            record_json["message_id"] = source_message_id   # §3.4 dedup key
+
+    run_id = record_run(
+        instance_name, trigger=trigger, status=status,
+        disruption_record_json=record_json, started_at=started,
+        finished_at=_time.time(),
+        final_status_version_id=getattr(final_state,
+                                        "committed_version_id", None))
+    verdicts = getattr(final_state, "round_verdicts", [])
+    if verdicts:
+        write_proposals(instance_name, run_id, verdicts)
+    yield {"status": status, "state": final_state, "run_id": run_id}
