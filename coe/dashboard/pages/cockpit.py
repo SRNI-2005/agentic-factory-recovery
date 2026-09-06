@@ -75,6 +75,26 @@ _NODE_LABELS: dict[str, str] = {
 }
 
 
+def _derive_reference_clock(instance_name: str) -> int:
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.session import make_engine
+
+    with Session(make_engine()) as session:
+        row = session.execute(
+            text("SELECT id FROM instances WHERE name = :n"),
+            {"n": instance_name},
+        ).mappings().first()
+        if row is None:
+            return 0
+        latest = session.execute(text(
+            "SELECT MAX(se.end_time) FROM schedule_entries se "
+            "WHERE se.instance_id = :iid"
+        ), {"iid": row["id"]}).scalar()
+        return int(latest) if latest else 0
+
+
 def _run_recovery(instance_name: str, narrative: str) -> None:
     import streamlit as st
 
@@ -82,6 +102,7 @@ def _run_recovery(instance_name: str, narrative: str) -> None:
 
     # Capture the active schedule BEFORE recovery runs
     before_entries = _fetch_active_entries(instance_name)
+    reference_clock = _derive_reference_clock(instance_name)
 
     with st.status("Running recovery pipeline…", expanded=True) as status:
         feed_lines: list[str] = []
@@ -90,6 +111,7 @@ def _run_recovery(instance_name: str, narrative: str) -> None:
         result = None
         for chunk in execute_recovery_streaming(
             instance_name, trigger="CLI", narrative=narrative,
+            reference_clock=reference_clock,
         ):
             if "node" in chunk:
                 label = _NODE_LABELS.get(chunk["node"], chunk["node"])
@@ -127,7 +149,7 @@ def _render_outcome(status: str, state) -> None:
 
     st.markdown(f"**Outcome:** `{status}`")
 
-    solution = state.solution
+    solution = getattr(state, "solution", None)
     if solution:
         cols = st.columns(3)
         cols[0].metric("Makespan", solution.get("makespan", "—"))
@@ -229,7 +251,7 @@ def _render_diff_animation(instance_name: str, before_entries: list[dict]) -> No
 def _outcome_text(status: str, state) -> str:
     parts = [f"Recovery outcome: **{status}**"]
 
-    solution = state.solution
+    solution = getattr(state, "solution", None)
     if solution:
         parts.append(
             f"Makespan {solution.get('makespan', '—')} · "
@@ -242,7 +264,7 @@ def _outcome_text(status: str, state) -> str:
             "UNKNOWN = solver budget-exhausted (not a material conflict)."
         )
 
-    if status == "COMMITTED" and state.explanation:
+    if status == "COMMITTED" and getattr(state, "explanation", None):
         parts.append(f"\n\n{state.explanation}")
 
     return "\n\n".join(parts)

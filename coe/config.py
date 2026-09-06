@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     solver_num_search_workers: int = 8
 
     # --- Phase 3 (spec §9) ---
+    google_api_key: str | None = None     # read from .env; injected into os.environ for langchain-google-genai
     llm_provider: str | None = None       # no default: fail fast if unset
     llm_model: str | None = None          # no default: fail fast if unset
     llm_temperature: float = 0.0          # reproducibility
