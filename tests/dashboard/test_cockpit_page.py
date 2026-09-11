@@ -160,7 +160,8 @@ def test_render_committed_recovery():
             render()
 
         mock_exec.assert_called_once_with(
-            "demo", trigger="CLI", narrative="Machine M1 failed"
+            "demo", trigger="CLI", narrative="Machine M1 failed",
+            reference_clock=0,
         )
         assert len(st.session_state["cockpit_messages"]) == 2
         assert st.session_state["cockpit_messages"][0]["role"] == "user"

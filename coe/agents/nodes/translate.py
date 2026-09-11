@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from coe.agents.records import (
     RecordValidationError,
+    check_narrative_ids,
     parse_disruption_record,
     validate_record_fields,
 )
@@ -43,9 +44,14 @@ Rules: exactly ONE disruption per record — if the report describes \
 several simultaneous disruptions, output {"error":"multiple disruptions"} \
 and nothing else. Resolve relative times ("two hours ago") against the \
 reference clock given in the prompt; occurred_at is an absolute minute. \
-The report may use natural language names (e.g. "machine one", "press 01"). \
-Map these to the closest matching valid identifier from the list provided \
-in the prompt — never invent an ID that isn't in the valid list."""
+The report may use natural language names (e.g. "machine one", "press 01") \
+only when no explicit identifier token appears: map those loosely to the \
+matching valid identifier. If the report names an explicit identifier \
+(e.g. "MC-04", "M3", "W10", "MAT-001"): first find the valid identifier \
+with the SAME trailing digits ("MC-04" matches machine M4; "MAT-1" \
+matches MAT-001). Bind to that one and output it. If NO valid identifier \
+shares those digits, reject — output {"error":"unknown resource <id>"} \
+— and NEVER substitute a different identifier for it (§4.1 layer 3)."""
 
 
 class TranslationFailed(RuntimeError):
@@ -171,6 +177,8 @@ def run_translate(state: RecoveryState, *, client,
                 record = validate_record_fields(
                     record, session=session,
                     instance_name=state.instance_name)
+                check_narrative_ids(
+                    record, narrative=state.narrative, valid_ids=valid_ids)
             except (ValueError, ValidationError, RecordValidationError) \
                     as exc:
                 feedback = (f"\n\nYour previous output was rejected: "

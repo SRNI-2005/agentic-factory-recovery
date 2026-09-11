@@ -128,3 +128,51 @@ def test_state_defaults_and_threading():
     s2 = s.model_copy(update={"narrative": "MC-04 seized"})
     assert s2.narrative == "MC-04 seized"
     assert s.narrative == ""          # immutable updates, langgraph-friendly
+
+
+# --- narrative-ID guard (defect 2026-09-12: MC-999 silently rewritten) ---
+
+def test_unknown_explicit_id_token_rejected(clean_db):
+    from coe.agents.records import RecordValidationError, check_narrative_ids
+
+    with pytest.raises(RecordValidationError, match="silently"):
+        check_narrative_ids(
+            _machine(machine_id="M0"),
+            narrative="MC-999 gearbox seized, sparks everywhere",
+            valid_ids={"machines": ["M0", "M1", "M3"],
+                       "workers": [], "materials": []})
+
+
+def test_explicit_id_match_allowed(clean_db):
+    from coe.agents.records import check_narrative_ids
+
+    check_narrative_ids(
+        _machine(machine_id="M3"),
+        narrative="M3 gearbox seized", valid_ids={"machines": ["M3"]})
+    check_narrative_ids(
+        _machine(machine_id="M3"),
+        narrative="m-3 gearbox seized",    # case + separator normalization
+        valid_ids={"machines": ["M3"]})
+
+
+def test_natural_language_mapping_allowed_without_tokens(clean_db):
+    from coe.agents.records import check_narrative_ids
+
+    check_narrative_ids(
+        _machine(machine_id="M3"),
+        narrative="machine three gearbox seized, sparks everywhere",
+        valid_ids={"machines": ["M0", "M1", "M3"]})
+
+
+def test_cross_resource_token_mismatch_rejected(clean_db):
+    from coe.agents.records import RecordValidationError, check_narrative_ids
+
+    record = {"kind": "WORKER", "instance_id": "factory_demo_01",
+              "worker_id": "W5", "event_type": "WORKER_ABSENT",
+              "occurred_at": 5, "severity": "LOW",
+              "narrative_excerpt": "M3 down"}
+    with pytest.raises(RecordValidationError, match="M3"):
+        check_narrative_ids(
+            record, narrative="M3 down", valid_ids={"machines": ["M3"],
+                                                    "workers": ["W3", "W5"],
+                                                    "materials": []})

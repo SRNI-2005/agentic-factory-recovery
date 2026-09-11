@@ -380,6 +380,18 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--sku", default="MAT-001")
     ts.add_argument("--at", type=int, default=300)
 
+    tr = mq_sub.add_parser("test-return",
+                            help="phone-back: worker is available again")
+    tr.add_argument("--instance", default="factory_demo_01")
+    tr.add_argument("--worker", default="W3")
+    tr.add_argument("--at", type=int, default=530)
+
+    tre = mq_sub.add_parser("test-restock",
+                             help="supplier delivery arrives (telemetry only)")
+    tre.add_argument("--instance", default="factory_demo_01")
+    tre.add_argument("--sku", default="MAT-001")
+    tre.add_argument("--at", type=int, default=300)
+
     dash = sub.add_parser("dashboard", help="launch the Streamlit cockpit")
     dash.add_argument("--port", type=int, default=8501)
 
@@ -610,6 +622,90 @@ def main(argv=None) -> None:
                     print(f"OK: MATERIAL_SHORTAGE stored once ({mid})")
                     raise SystemExit(0)
                 raise SystemExit("FAIL: shortage not ingested within 5s")
+            finally:
+                handle.stop()
+
+        if args.mqtt_cmd == "test-return":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_resource_event
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            try:
+                mid = publish_resource_event(
+                    instance_name=args.instance, resource_kind="WORKER",
+                    resource_id=args.worker, event_type="WORKER_RETURN",
+                    occurred_at=args.at, severity="LOW",
+                    reason="cli_proof_return",
+                )
+                deadline = time.time() + 5
+                engine = make_engine()
+                found = False
+                while time.time() < deadline and not found:
+                    with engine.begin() as c:
+                        n = c.execute(text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid "
+                            "AND te.event_type = 'WORKER_RETURN'"),
+                            {"inst": args.instance, "mid": mid}).scalar_one()
+                        avail = c.execute(text(
+                            "SELECT count(*) FROM workers wk "
+                            "JOIN instances i ON wk.instance_id = i.id "
+                            "WHERE i.name = :inst AND wk.name = :w "
+                            "AND wk.status = 'AVAILABLE' AND NOT EXISTS ("
+                            "SELECT 1 FROM worker_absence_windows w "
+                            "WHERE w.instance_id = i.id AND w.worker_id = "
+                            "wk.id AND w.absence_until IS NULL)"),
+                        {"inst": args.instance, "w": args.worker}).scalar_one()
+                    found = n == 1 and avail == 1
+                    if not found:
+                        time.sleep(0.25)
+                if found:
+                    print(f"OK: WORKER_RETURN stored once and no open "
+                          f"absence remains ({mid})")
+                    raise SystemExit(0)
+                raise SystemExit("FAIL: return not fully ingested within 5s")
+            finally:
+                handle.stop()
+
+        if args.mqtt_cmd == "test-restock":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_resource_event
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            try:
+                mid = publish_resource_event(
+                    instance_name=args.instance, resource_kind="MATERIAL",
+                    resource_id=args.sku, event_type="MATERIAL_RESTOCK",
+                    occurred_at=args.at, severity="LOW",
+                    reason="cli_proof_restock",
+                )
+                deadline = time.time() + 5
+                engine = make_engine()
+                found = False
+                while time.time() < deadline and not found:
+                    with engine.begin() as c:
+                        n = c.execute(text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid "
+                            "AND te.event_type = 'MATERIAL_RESTOCK'"),
+                            {"inst": args.instance, "mid": mid}).scalar_one()
+                    found = n == 1
+                    if not found:
+                        time.sleep(0.25)
+                if found:
+                    print(f"OK: MATERIAL_RESTOCK stored once ({mid})")
+                    raise SystemExit(0)
+                raise SystemExit("FAIL: restock not ingested within 5s")
             finally:
                 handle.stop()
 

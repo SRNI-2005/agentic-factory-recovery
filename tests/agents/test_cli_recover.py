@@ -15,15 +15,21 @@ def g_world(clean_db):
 def test_preflight_fails_fast(g_world, monkeypatch):
     """Missing provider/model exits before any graph work (§9)."""
     import coe.cli as cli
-    from coe.config import get_settings
+    from coe.config import Settings, get_settings
 
     args = cli.build_parser().parse_args([
         "recover", "--instance", "g-world", "--narrative", "boom"])
-    monkeypatch.delenv("LLM_PROVIDER", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
-    # Settings are lru_cached and also read .env; clear so a provider value
-    # cached by an earlier test (or .env) cannot leak into this check.
+    # pydantic_settings reads .env directly, so monkeypatch the Settings
+    # object's lru_cache to return a config without provider/model.
     get_settings.cache_clear()
+    monkeypatch.setattr(
+        "coe.config.get_settings",
+        lambda: Settings(
+            database_url=get_settings().database_url,
+            llm_provider=None,
+            llm_model=None,
+        ),
+    )
     try:
         with pytest.raises(SystemExit, match="LLM_PROVIDER"):
             cli._run_recover(args)

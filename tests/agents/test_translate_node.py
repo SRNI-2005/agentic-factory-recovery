@@ -9,9 +9,10 @@ pytestmark = pytest.mark.db
 from tests.fixtures.llm.fake_client import FakeLLMClient
 
 NARRATIVE = "MC-04 gearbox seized, sparks everywhere"
+# MC-04 binds (unique digit match) to M4 among machines M0..M7
 GOOD_MACHINE = {
     "kind": "MACHINE", "instance_id": "factory_demo_01",
-    "machine_id": "M3", "event_type": "FAILURE", "occurred_at": 512,
+    "machine_id": "M4", "event_type": "FAILURE", "occurred_at": 512,
     "severity": "HIGH", "estimated_downtime": 90,
     "narrative_excerpt": NARRATIVE,
 }
@@ -178,3 +179,56 @@ def test_cli_message_id_stable():
     b = cli_message_id(dict(GOOD_MACHINE))     # copy, same content
     assert a == b and a.startswith("cli-")
     assert a != cli_message_id(dict(GOOD_MACHINE, occurred_at=600))
+
+
+# --- silent-rewrite guard (defect 2026-09-12) --------------------------
+
+UNKNOWN_ID_NARRATIVE = "MC-999 gearbox seized, sparks everywhere"
+REWRITTEN = dict(GOOD_MACHINE, machine_id="M3",
+                 narrative_excerpt=UNKNOWN_ID_NARRATIVE)
+
+
+def test_unknown_explicit_id_rewrites_never_pass(demo):
+    """Model that 'fixes' MC-999 into a valid ID must be forced to retry,
+    then abort TRANSLATION_FAILED (P3 §4.1 layer 3 / §11 Tier 1)."""
+    import pytest as _pytest
+
+    from coe.agents.nodes.translate import TranslationFailed, run_translate
+    from coe.agents.state import RecoveryState
+
+    response = json.dumps(dict(REWRITTEN, narrative_excerpt=
+                               UNKNOWN_ID_NARRATIVE))
+    client = FakeLLMClient([response] * 3)
+    with _pytest.raises(TranslationFailed):
+        run_translate(
+            RecoveryState(instance_name="factory_demo_01",
+                          reference_clock=30,
+                          narrative=UNKNOWN_ID_NARRATIVE),
+            client=client, max_retries=2)
+    assert len(client.calls) == 3     # retried, never accepted
+
+
+def test_natural_language_mapping_still_accepted(demo):
+    from coe.agents.nodes.translate import run_translate
+    from coe.agents.state import RecoveryState
+
+    out = run_translate(
+        RecoveryState(instance_name="factory_demo_01", reference_clock=30,
+                      narrative="machine three gearbox seized"),
+        client=FakeLLMClient([json.dumps(REWRITTEN)] * 3), max_retries=2)
+    assert out.disruption_record["machine_id"] == "M3"
+
+
+def test_digit_binding_corrects_mismapped_explicit_token(demo):
+    """MC-04 binds to M4 uniquely; an M3 rewrite retries into M4."""
+    from coe.agents.nodes.translate import run_translate
+    from coe.agents.state import RecoveryState
+
+    wrong = dict(REWRITTEN, machine_id="M3")
+    right = dict(REWRITTEN, machine_id="M4")
+    out = run_translate(
+        RecoveryState(instance_name="factory_demo_01", reference_clock=30,
+                      narrative=NARRATIVE),
+        client=FakeLLMClient([json.dumps(wrong), json.dumps(right)]),
+        max_retries=2)
+    assert out.disruption_record["machine_id"] == "M4"
