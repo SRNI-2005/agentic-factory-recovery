@@ -12,6 +12,7 @@
 
 ## Global Constraints
 
+- **Subagent model policy (user ruling 2026-09-12):** both implementer and reviewer subagents run on model `glm-5.3-flash` for this plan's execution.
 - `uv` exclusively; never pip/system Python. CWD always repo root.
 - Alembic is authoritative DDL; `create_all` is forbidden.
 - All times integer minutes; occurred_at >= 0 (negative crashes CP-SAT).
