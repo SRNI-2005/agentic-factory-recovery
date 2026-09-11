@@ -497,22 +497,27 @@ def build_payload(
     # audit-relevant). For RECOVERY with a reference clock `now`, consumed
     # history leaves the picture: capacity = initial stock MINUS bars
     # consumed before `now` (frozen plays: completions + in-progress starts),
-    # and pre-clock receipts are FOLDED INTO that effective stock instead of
-    # staying refill rows (they refill no future consumption).
+    # and pre-clock receipts (available_at <= now) are FOLDED INTO that
+    # effective stock instead of staying refill rows (they refill no future
+    # consumption). Consumption is gated on payload status (COMPLETED /
+    # IN_PROGRESS after the freeze), mirroring P2 §3.1 boundary semantics.
     now_ = now if recovering else None
     consumed_by_sku: dict[str, int] = {}
     if recovering and now_ is not None:
-        for ae in active_by_opid.values():
-            if ae.start_time < now_:
-                op_key = op_id(job_name[op_by_id[ae.operation_id].job_id],
-                               op_by_id[ae.operation_id].sequence_number)
-                for d in bom_by_op.get(op_key, []):
-                    consumed_by_sku[d["sku"]] = (
-                        consumed_by_sku.get(d["sku"], 0) + d["quantity"])
+        for entries in ops_by_job.values():
+            for e in entries:
+                if e["status"] in ("COMPLETED", "IN_PROGRESS"):
+                    for d in bom_by_op.get(e["operation_id"], []):
+                        consumed_by_sku[d["sku"]] = (
+                            consumed_by_sku.get(d["sku"], 0) + d["quantity"])
+    folded_by_sku: dict[str, int] = {}
     if recovering and now_ is not None:
+        for r, sku in receipt_rows:
+            if r.available_at <= now_:
+                folded_by_sku[sku] = folded_by_sku.get(sku, 0) + r.quantity
         all_receipts = [
             {"sku": sku, "quantity": r.quantity, "available_at": r.available_at}
-            for r, sku in receipt_rows if r.available_at >= now_
+            for r, sku in receipt_rows if r.available_at > now_
         ]
     else:
         all_receipts = [
@@ -525,8 +530,10 @@ def build_payload(
         {"sku": s,
          "capacity": stock_by_sku.get(s, 0)
                      - (consumed_by_sku.get(s, 0)
+                        if recovering and now_ is not None else 0)
+                     + (folded_by_sku.get(s, 0)
                         if recovering and now_ is not None else 0)}
-        for s in sorted(stock_by_sku)
+        for s in sorted(set(stock_by_sku) | set(folded_by_sku))
     ]
 
     # ---- initial family seeding from the active snapshot ----
