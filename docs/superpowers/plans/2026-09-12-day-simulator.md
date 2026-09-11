@@ -886,9 +886,13 @@ git add -A && git commit -m "feat(simulator): day projector"
   `coe/agents/graph.py:228`), `fork_instance` (Task 8 clone path),
   `MaterialReceipt`, `MaterialTransaction` (Task 2).
 - Produces:
-  - `def walk_timeline(timeline, *, instance_name: str, speed: int | str = "instant", llm_client=None, start_index: int = 0, machine_map=None) -> Iterator[dict]`
-    yielding feed items `{"event": "phase", "t": ..., "idx": ...}` and
+  - `def walk_timeline(timeline: "Timeline | str", *, instance_name: str, speed: int | str = "instant", llm_client_factory=None, start_index: int = 0) -> Iterator[dict]`
+    — accepts an already-loaded `Timeline` **or a path string** (loaded
+    lazily via `load_timeline`); yields feed items
+    `{"event": "phase", "t": ..., "idx": ...}` and
     terminal summary `{"event": "done", "committed": [...], ...}`.
+    Determinism: any recovery sequence on this walk runs with
+    `num_search_workers=1` (P2 §9; the engine pins it for the walk).
   - `def _scripted_message_id(script_name: str, idx: int) -> str` —
     `simul-{sha256(f"{script_name}|{idx}")[:12]}`.
 
@@ -969,16 +973,28 @@ Expected: FAIL (module missing).
 """Scripted-day walker (spec §5). Deterministic; drives only public entry
 points; yields feed items for BOTH the CLI (print) and the dashboard."""
 import hashlib
+import os
 from typing import Iterator
 
 from coe.simulator.timeline import (
     MachineEvent, MaterialEvent, NarrativeEvent, Timeline, WorkerEvent,
+    load_timeline,
 )
 
 
 def _scripted_message_id(script_name: str, idx: int) -> str:
     canonical = f"{script_name}|{idx}"
     return "simul-" + hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
+def _walk_paced(speed) -> float | None:
+    """None = instant. N means N schedule-minutes per wall-minute: the
+    inter-event wall pause for a gap of g schedule-minutes is
+    g * 60 / N seconds (bounded to <= 10 s so a sparse script doesn't
+    stall the thread of a CLI run)."""
+    if speed == "instant":
+        return None
+    return 60.0 / int(speed)
 
 
 def _record_to_wire(ev, *, instance_name: str, message_id: str) -> dict:
@@ -1009,18 +1025,21 @@ def _speed_pace(speed) -> float | None:
     return 60.0 / int(speed)
 
 
-def walk_timeline(timeline: Timeline, *, instance_name: str,
+def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                   speed="instant", llm_client_factory=None,
                   start_index: int = 0) -> Iterator[dict]:
-    """Walk `timeline.events[from start_index:]` in order.
+    """Walk `timeline.events[from start_index:]`.
 
-    Structured events ingest via the shared Phase 1 function (idempotent
-    message ids). NARRATIVE events run the real recovery graph once each,
-    passing reference_clock=ev.t. Resumability: given start_index k>
-    events with index < k are ALREADY during this run — the walk re-affirms
-    idempotent skip by just not re-ingesting them.
+    Structured events ingest via the shared Phase 1 ingestion function
+    (idempotent scripted message ids). NARRATIVE events run the real
+    recovery graph once each, passing reference_clock = event.t. Resume:
+    events with index < start_index are already persisted and are simply
+    not re-executed (idempotency would suppress them anyway; skipping
+    keeps the log truthful).
     """
-    pace = _speed_pace(speed)
+    if isinstance(timeline, str):
+        timeline = load_timeline(timeline)
+    pace = _walk_paced(speed)
     import time
 
     committed = []
@@ -1029,11 +1048,17 @@ def walk_timeline(timeline: Timeline, *, instance_name: str,
             continue
         if pace is not None and idx > start_index:
             gap = ev.t - timeline.events[idx - 1].t
-            time.sleep(min(gap, 10) * pace / 60.0 * 60.0 / 60.0)
-        # ^ pacing math: 1 schedule-minute at N× == 60/N wall seconds.
+            time.sleep(min(gap * 60.0 / int(speed), 10))
         if isinstance(ev, NarrativeEvent):
             from coe.agents.graph import execute_recovery
+
             client = llm_client_factory() if llm_client_factory else None
+            # P2 §9: determinism consumers pin single-worker search. Settings
+            # are lru_cached, so force the env and clear the cache BEFORE the
+            # first recovery in this process.
+            os.environ["SOLVER_NUM_SEARCH_WORKERS"] = "1"
+            from coe.config import get_settings
+            get_settings.cache_clear()
             st = execute_recovery(
                 instance_name, trigger="CLI", narrative=ev.text,
                 reference_clock=ev.t, client=client)
@@ -1042,6 +1067,7 @@ def walk_timeline(timeline: Timeline, *, instance_name: str,
                    "status": getattr(st, "status", None)}
         else:
             from coe.mqtt.ingest import ingest_telemetry_event
+
             telemetry_id, created = ingest_telemetry_event(
                 _record_to_wire(ev, instance_name=instance_name,
                                 message_id=_scripted_message_id(
@@ -1422,6 +1448,11 @@ def render() -> None:
     ...
 ```
 
+Page-contract note: the render body honors `st.session_state["sim_script"]`
+(script path override) and `st.session_state["sim_speed"]` when set —
+tests (and the CLI page entry) need no monkeypatching; when unset, the page
+defaults to the sidebar selectboxes over `data/timelines/*.json`.
+
 FLATTEN THE SKELETON: implement the full page — big clock `st.metric`,
 `st.progress` per event index, event feed via `st.status` (mirroring
 cockpit.py's `_run_recovery` `st.status`+`feed_area` pattern), Pause button
@@ -1457,9 +1488,20 @@ uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.jso
 ```
 
 and to the `import hutter` line, the explicit-dir form:
-`import hutter --dir data/raw/nouri-fjspw/extracted --text MFJW/SFJW
-(extracted dir!)` — verify the actual working form with `--help` before
+`import hutter --dir data/raw/nouri-fjspw/extracted`
+(extracted!) — verify the actual working form with `--help` before
 writing; also add a `simulate` bullet to the architecture bullet list.
+
+- [ ] **Step 1b: Prior-spec amendment markers (repo convention: amendment
+  markers are normative)**
+  - In `docs/superpowers/specs/2026-08-20-phase1-infrastructure-data-ingestion-design.md`
+    §6.4, append one line to the material_transactions block:
+    `> **[Amendment 2026-09-12 — day simulator]:** the reserved table is now
+    built (migration #7); CONSUME rows are written by the Phase 2 committer,
+    RESTOCK rows by the day-simulator engine; REFILL is reserved with no
+    current producer.`
+  - Confirm the P2 §6.11 annotation from Task 3 is present (it is Task 3's
+    own step; skip if you executed Task 3).
 
 - [ ] **Step 2: Run the full quick gate**
 

@@ -83,21 +83,25 @@ schedule state directly — only through the graph and the ingestion function.
 
 - **Event kinds:** the six structured Phase 1 events (FAILURE, MAINTENANCE,
   WORKER_ABSENT, WORKER_RETURN, MATERIAL_SHORTAGE, MATERIAL_RESTOCK) plus
-  `NARRATIVE` events (text + `at`) that trigger exactly one graph run each —
-  §4.1 one-disruption-per-run scope preserved.
+  `NARRATIVE` events (text + severity) that trigger exactly one graph run
+  each — §4.1 one-disruption-per-run scope preserved.
 - **Time:** events advance the scripted clock monotonically; each agentic step
   passes `reference_clock = event.t`; structured events set their own
   `occurred_at = event.t`.
 - **Pacing modes:** `instant` (no wall-clock waits, event-to-event) and
-  `N×` (schedule-minute-to-wall-second scale with MMO-style inter-event pacing;
-  a 1-day script at 60× ≈ 2–3 min of watching). Dashboard exposes
+  `N×` (N schedule-minutes progress per wall-minute; the shipped ~700-minute
+  arc takes ≈ 12 wall-minutes at 60×, seconds at instant). Dashboard exposes
   pause/resume/step; the engine reports progress via a generator of event
   feed items so both surfaces consume one implementation.
 - **Resume:** from the run log's last completed index k — earlier events are
   skipped (they are already persisted; idempotency guarantees no duplicates),
   execution continues at k+1. No DB checkpoint row needed.
+- **Determinism:** every agentic recovery along the walk runs in
+  **`num_search_workers=1`** mode (P2 §9's mandatory configuration for
+  reproducibility consumers) so the commit chain is replay-stable; the same
+  timeline + seed + fake LLM ⇒ byte-identical committed versions.
 - **Isolation:** `--on-clone` (default for demos) clones the source instance
-  per run (`simulate-day-<script>@<8hex>`), matching the e2e harness pattern.
+  per run (`sim-<script>@<8hex>`), matching the e2e harness pattern.
 
 ## 6. CLI + configuration
 
@@ -111,35 +115,43 @@ Pydantic settings: `SIMULATE_DEFAULT_SPEED` (default 30), `SIMULATE_CLONE`
 
 ## 7. Shipped timeline
 
-`data/timelines/demo_day_01.json` — deterministic arc based on factory_demo_01
-(seed 42): 08:20 M3 failure (agentic: full recovery commit) → 09:30 W3 sick →
-10:15 MAT-001 shortage (agentic; expect suspend/defer reaction) → 12:00
-mat-001 restock → 13:30 W3 returns → 14:00 FOLLOWUP narrative confirming M3
-back. Must pass end to end with the current stack.
+`data/timelines/demo_day_01.json` — the full story arc on factory_demo_01
+(seed 42), strictly as concretized by the plan's Task 8 artifact: 08:20 M3
+FAILURE (structured, hours window) → 08:50 narrative recovery ("M3 spindle
+seized", agentic commit) → 10:15 MATERIAL_SHORTAGE MAT-001 (structured
+telemetry) → 10:40 narrative shortage-plan recovery (agentic: expect
+suspend/defer + expedite) → 12:00 MATERIAL_RESTOCK MAT-001 (qty 112; engine
+materializes receipt + RESTOCK ledger row) → 12:30 W3 absent (240 min) →
+13:20 MAT-002 restock (qty 80) → narrative W3-returns recovery (agentic) →
+16:00 M5 planned MAINTENANCE (60 min). Must pass end to end with the current
+stack.
 
 ## 8. Testing strategy
 
-- **Tier 1 Effect (unit):** schema validation cases; projector classification
+- **Tier 1 (unit):** schema validation cases; projector classification
   boundaries (end == t is COMPLETED); deduction arithmetic on crafted payloads.
-- **Tier 2 Ledger:** committer CONSUME rows correct + idempotent under
-  re-commit; ingest REFILL rows for receipts.
-- **Tier 3 Engine:** fake-LLM determinism (byte-identical commit chain);
-  resume-from-k correctness; instant mode completes under the suite budget.
+- **Tier 2 (ledger):** committer CONSUME rows correct and re-committed without
+  duplicates; engine RESTOCK rows (receipt + ledger row) for scripted restocks;
+  `REFILL` is a reserved type with no current producer (documented).
+- **Tier 3 (engine):** fake-LLM determinism (byte-identical commit chain with
+  `num_search_workers=1`); resume-from-k correctness; instant mode completes
+  under the suite budget.
 - **Tier 4 Surfaces:** CLI happy path tests (schema errors exit 1 with a
   message, not a traceback), AppTest smoke of the Simulate page (render +
   scripted "instant" full walk on a tiny timeline).
 
 ## 9. Acceptance criteria
 
-1. `simulate timeline ` full run of the shipped timeline commits ≥ 2 recovery
+1. `simulate timeline` full run of the shipped timeline commits ≥ 2 recovery
    versions and writes material ledger rows, against a clone instance.
-2. Deterministic replay: same script + fake LLM ⇒ byte-identical recovery
-   commit chain (criterion parity with P3 determinism).
-3. Mid-day realism: a recovery scripted at t=420 shows frozen COMPLETED/IN_
-   PROGRESS entries from the morning timeline segment, and the payload's
+2. Deterministic replay: same script + fake LLM + `num_search_workers=1` ⇒
+   byte-identical recovery commit chain (criterion parity with P3
+   determinism / P2 §9).
+3. Mid-day realism: a recovery scripted at t=420 shows frozen COMPLETED/
+   IN_PROGRESS entries from the morning timeline segment, and the payload's
    effective stock equals initial stock − consumed-up-to-clock.
-4. Ledger integrity: Σ over rows satisfies盘点 CONSUME matches committed
-   schedule's BOM at each version boundary (violations fail tests loudly).
+4. Ledger integrity: Σ CONSUME rows matches the committed schedule's BOM at
+   each version boundary (violations fail tests loudly).
 5. Dashboard page streams live and pause/resume/step works (AppTest-able).
 6. Full existing suite (quick gate) continues to pass — simulator adds no
    production coupling beyond §4's two amend points.
