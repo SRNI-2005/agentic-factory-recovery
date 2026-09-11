@@ -25,7 +25,7 @@ def test_insert_and_check_constraint(clean_db):
         # invalid type must violate the CHECK
         row_bad = MaterialTransaction(
             instance_id=inst.id, operation_id=None, material_id=None,
-            quantity=1, timestamp=1,             transaction_type="BROKEN_TY",
+            quantity=1, timestamp=1, transaction_type="BROKEN_TY",
             source="simulate")
         s.add(row_bad)
         try:
@@ -42,25 +42,71 @@ def test_commit_writes_consume_rows(demo_scenario):
     import subprocess
 
     from sqlalchemy import text
+    from sqlalchemy.orm import Session
 
+    from coe.db.models.provenance import Instance
     from coe.db.session import make_engine
+    from coe.services.fork import fork_instance
 
-    subprocess.run(
-        ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
-         "--instance", "factory_demo_01"],
-        check=True, capture_output=True)
+    with Session(make_engine()) as s:
+        source = (s.query(Instance)
+                  .filter(Instance.name == "factory_demo_01").one())
+        forked = fork_instance(s, source)
+        s.commit()
+        clone_name = forked.name
+
+    def consume_count():
+        with make_engine().begin() as c:
+            return c.execute(text(
+                "SELECT COUNT(*) FROM material_transactions mt "
+                "JOIN instances i ON i.id = mt.instance_id "
+                "WHERE i.name = :name "
+                "AND mt.transaction_type = 'CONSUME' "
+                "AND mt.source = 'commit'"), {"name": clone_name}).scalar()
+
+    def run_baseline():
+        subprocess.run(
+            ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
+             "--instance", clone_name],
+            check=True, capture_output=True)
+
+    run_baseline()
+    c1 = consume_count()
     with make_engine().begin() as c:
-        # NOTE: brief's sketch (SELECT te.operation_id ... LEFT JOIN operations)
-        # is invalid SQL — operations has no operation_id column and COUNT(*)
-        # with a bare column needs GROUP BY. Simplified to a COUNT with the
-        # same intent: at least one CONSUME/commit row must exist.
-        rows = c.execute(text(
-            "SELECT COUNT(*) FROM material_transactions mt "
-            "WHERE mt.transaction_type = 'CONSUME' AND mt.source = 'commit'"
-        )).scalar()
-        assert rows, "expected at least one committed op BOM consumption row"
-        # every row's instance_id belongs to factory_demo_01:
-        assert c.execute(text(
-            "SELECT COUNT(*) FROM material_transactions mt "
-            "JOIN instances i ON i.id = mt.instance_id "
-            "WHERE i.name = 'factory_demo_01'")).scalar() >= 1
+        first_version = c.execute(text(
+            "SELECT sv.id FROM schedule_versions sv "
+            "JOIN instances i ON i.id = sv.instance_id "
+            "WHERE i.name = :name "
+            "ORDER BY sv.version_number DESC LIMIT 1"),
+            {"name": clone_name}).scalar_one()
+        first_expected = c.execute(
+            text(_ledger_expectation_sql()), {"vid": first_version}).scalar()
+    assert c1 == first_expected
+
+    # Re-commit on the same clone: the ledger has no version_id, each commit
+    # appends CONSUME rows for its own version's non-frozen entries, so the
+    # growth must equal the second version's expectation exactly.
+    run_baseline()
+    c2 = consume_count()
+    assert c2 > c1
+    with make_engine().begin() as c:
+        last_version = c.execute(text(
+            "SELECT sv.id FROM schedule_versions sv "
+            "JOIN instances i ON i.id = sv.instance_id "
+            "WHERE i.name = :name "
+            "ORDER BY sv.version_number DESC LIMIT 1"),
+            {"name": clone_name}).scalar_one()
+        assert last_version != first_version
+        expected = c.execute(
+            text(_ledger_expectation_sql()), {"vid": last_version}).scalar()
+    assert c2 - c1 == expected
+
+
+def _ledger_expectation_sql() -> str:
+    return (
+        "SELECT COUNT(*) FROM schedule_entries se "
+        "JOIN operations o ON o.id = se.operation_id "
+        "JOIN operation_bom ob ON ob.operation_id = o.id "
+        "AND ob.instance_id = se.instance_id "
+        "WHERE se.version_id = :vid AND se.is_frozen = false"
+    )
