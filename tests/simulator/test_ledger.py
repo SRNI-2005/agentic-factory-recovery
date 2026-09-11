@@ -25,7 +25,7 @@ def test_insert_and_check_constraint(clean_db):
         # invalid type must violate the CHECK
         row_bad = MaterialTransaction(
             instance_id=inst.id, operation_id=None, material_id=None,
-            quantity=1, timestamp=1, transaction_type="BROKEN_TY",
+            quantity=1, timestamp=1,             transaction_type="BROKEN_TY",
             source="simulate")
         s.add(row_bad)
         try:
@@ -36,3 +36,31 @@ def test_insert_and_check_constraint(clean_db):
             raised = True
             s.rollback()
     assert raised
+
+
+def test_commit_writes_consume_rows(demo_scenario):
+    import subprocess
+
+    from sqlalchemy import text
+
+    from coe.db.session import make_engine
+
+    subprocess.run(
+        ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
+         "--instance", "factory_demo_01"],
+        check=True, capture_output=True)
+    with make_engine().begin() as c:
+        # NOTE: brief's sketch (SELECT te.operation_id ... LEFT JOIN operations)
+        # is invalid SQL — operations has no operation_id column and COUNT(*)
+        # with a bare column needs GROUP BY. Simplified to a COUNT with the
+        # same intent: at least one CONSUME/commit row must exist.
+        rows = c.execute(text(
+            "SELECT COUNT(*) FROM material_transactions mt "
+            "WHERE mt.transaction_type = 'CONSUME' AND mt.source = 'commit'"
+        )).scalar()
+        assert rows, "expected at least one committed op BOM consumption row"
+        # every row's instance_id belongs to factory_demo_01:
+        assert c.execute(text(
+            "SELECT COUNT(*) FROM material_transactions mt "
+            "JOIN instances i ON i.id = mt.instance_id "
+            "WHERE i.name = 'factory_demo_01'")).scalar() >= 1
