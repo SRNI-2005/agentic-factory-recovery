@@ -47,3 +47,24 @@ class MaterialReceipt(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     available_at: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(40))
+
+
+class MaterialTransaction(Base):
+    """Runtime material audit ledger (Phase 1 spec §6.4, built by the day
+    simulator amendment). Instance-scoped like every domain row."""
+    __tablename__ = "material_transactions"
+    __table_args__ = (
+        CheckConstraint(
+            "transaction_type IN ('CONSUME','REFILL','RESTOCK')",
+            name="mtx_type"),
+        CheckConstraint("quantity > 0", name="mtx_qty_pos"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instance_id: Mapped[int] = mapped_column(ForeignKey("instances.id"), index=True)
+    operation_id: Mapped[int | None] = mapped_column(ForeignKey("operations.id"))
+    material_id: Mapped[int | None] = mapped_column(ForeignKey("materials.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    timestamp: Mapped[int] = mapped_column(Integer)
+    transaction_type: Mapped[str] = mapped_column(String(12))
+    source: Mapped[str] = mapped_column(String(8))
