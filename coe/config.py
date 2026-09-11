@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     solver_random_seed: int = 42
     solver_num_search_workers: int = 8
 
+    simulate_default_speed: int = 30
+    simulate_clone: bool = True
+    simulate_max_horizon_days: int = 7
+
     # --- Phase 3 (spec §9) ---
     google_api_key: str | None = None     # read from .env; injected into os.environ for langchain-google-genai
     llm_provider: str | None = None       # no default: fail fast if unset
