@@ -357,6 +357,7 @@ Raw materials are *consumed*, not released when an operation finishes — so inv
 - Determinism: events are emitted in payload iteration order; identical payloads build identical reservoirs.
 
 > **Amendment 2026-08-25 (user-approved): time-phased shortfall warnings.** MATERIAL_SHORTFALL additionally fires when cumulative early-released demand exceeds stock-plus-timely-receipts at some release prefix, even when totals suffice. Dead-block (MATERIAL_UNAVAILABLE) semantics unchanged; warning shape unchanged. Rationale: restores Phase 3 §4.3 step-3 DEFER ("only timing is wrong") reachability.
+> **Amendment 2026-09-12 (day simulator):** for RECOVERY payloads with a reference clock, effective capacity = initial stock − BOM consumed before the clock by frozen completed and in-progress operations; receipts with available_at <= clock are folded into that stock (no double-refill). Baseline semantics unchanged.
 
 ## 7. Material Handling *(restructured by Amendment 2026-08-24)*
 
