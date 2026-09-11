@@ -20,8 +20,7 @@ BASE = {
          "worker_id": "W3", "duration": 240},
         {"t": 900, "kind": "MATERIAL", "event_type": "MATERIAL_SHORTAGE",
          "sku": "MAT-001"},
-        {"t": 1000, "kind": "NARRATIVE", "text": "M3 is back online",
-         "at": 1000},
+        {"t": 1000, "kind": "NARRATIVE", "text": "M3 is back online"},
     ],
 }
 
@@ -36,11 +35,11 @@ def test_load_happy_path(tmp_path):
 
 
 def test_per_kind_field_exclusivity():
-    from coe.simulator.timeline import TimelineEvent
+    from coe.simulator.timeline import MachineEvent, MaterialEvent
     with pytest.raises(ValidationError):
-        TimelineEvent(**BASE["events"][0] | {"worker_id": "W1"})
+        MachineEvent(**BASE["events"][0] | {"worker_id": "W1"})
     with pytest.raises(ValidationError):
-        TimelineEvent(**BASE["events"][2] | {"machine_id": "M1"})
+        MaterialEvent(**BASE["events"][2] | {"machine_id": "M1"})
 
 
 def test_non_monotonic_rejected(tmp_path):

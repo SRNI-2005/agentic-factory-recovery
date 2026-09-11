@@ -59,7 +59,6 @@ class NarrativeEvent(BaseModel):
     t: int = Field(ge=0)
     kind: Literal["NARRATIVE"]
     text: str
-    at: int | None = Field(default=None, ge=0)
     severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None
 
 
