@@ -1,34 +1,24 @@
 # tests/solver/test_payload_deduction.py
 """P2 §6.11 amendment (a): frozen/consumed stock deduction at recovery."""
-import subprocess
-
 import pytest
 
 pytestmark = pytest.mark.db
 
 
 @pytest.fixture()
-def stocky(demo_scenario):
-    """demo scenario is byte-deterministic; assert base stock via ORM."""
-    from sqlalchemy import text
+def baseline_ready():
+    """Shared session clone (fork of factory_demo_01 with a committed
+    baseline) instead of a per-test canonical-instance solve."""
+    from sqlalchemy.orm import Session
+
+    from coe.db.models.provenance import Instance
     from coe.db.session import make_engine
+    from tests.simulator.conftest import ensure_sim_baseline_clone
 
-    with make_engine().connect() as c:
-        iid = c.execute(text(
-            "SELECT id FROM instances WHERE name='factory_demo_01'"
-        )).scalar_one()
-        return iid
-
-
-@pytest.fixture()
-def baseline_ready(stocky, clean_db):
-    """Drive a real baseline schedule so recovery has frozen ops to deduct."""
-    r = subprocess.run(
-        ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
-         "--instance", "factory_demo_01"],
-        capture_output=True, text=True, timeout=600)
-    assert r.returncode == 0, r.stderr
-    return stocky
+    clone_name = ensure_sim_baseline_clone()
+    with Session(make_engine()) as s:
+        return s.query(Instance.id).filter(
+            Instance.name == clone_name).scalar_one()
 
 
 def test_recovery_payload_deducts_consumed(baseline_ready):

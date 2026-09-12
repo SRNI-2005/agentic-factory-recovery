@@ -2,7 +2,9 @@
 """Task 6: engine walker — scripted-day playback through shared entry
 points (spec §5). Structured events reuse Phase 1 ingestion; NARRATIVE
 events run the real recovery graph with a fake LLM client."""
+import hashlib
 import json
+import subprocess
 
 import pytest
 
@@ -74,6 +76,96 @@ def test_narrative_event_runs_graph_commit(tmp_path, demo_scenario):
         llm_client_factory=fake_factory))
     committed = [c["committed"] for c in items if c.get("event") == "done"]
     assert committed and len(committed[0]) >= 1   # at least one recovery version
+
+
+@pytest.mark.slow
+def test_narrative_walk_replay_chain_deterministic(tmp_path, demo_scenario):
+    """§9.2 evidence: replays committed chains deterministically.
+
+    Walks a (structured + NARRATIVE) timeline TWICE — each walk on its OWN
+    fresh fork of factory_demo_01 (same starting DB state), each baseline-
+    solved with workers=1 (determinism knob) and fed a     fresh FakeLLMClient
+    with the SAME canned response sequence — then compares the two clones'
+    committed schedule_versions chains. payload_json and the stored
+    payload_hash are instance-scoped (clone name + parent_version_id), so
+    the hash compared is computed over the payload with those two
+    clone-scoped fields removed; every other column matches byte-for-byte."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.models.provenance import Instance
+    from coe.db.session import make_engine
+    from coe.services.fork import fork_instance
+    from coe.simulator.engine import walk_timeline
+
+    script = _timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"},
+        {"t": 200, "kind": "NARRATIVE", "text": NARRATIVE,
+         "severity": "HIGH"}])
+
+    def _fresh_fork() -> str:
+        with Session(make_engine()) as s:
+            source = (s.query(Instance)
+                      .filter(Instance.name == "factory_demo_01").one())
+            forked = fork_instance(s, source)
+            s.commit()
+            clone = forked.name
+        # recovery commits only against an active schedule; both walks must
+        # start from the same DB state (fork + one deterministic baseline)
+        r = subprocess.run(
+            ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
+             "--instance", clone, "--workers", "1"],
+            check=True, capture_output=True, text=True, timeout=900)
+        assert r.returncode == 0, r.stderr
+        return clone
+
+    def _canned_responses(instance_name: str) -> list[str]:
+        # GOOD_MACHINE-shaped record bound to THIS clone (translate
+        # validates record.instance_id against the target instance);
+        # duplicated copies absorb any translate retry round — FakeLLMClient
+        # pops sequentially, unused entries are simply ignored.
+        record = dict(GOOD_MACHINE, instance_id=instance_name)
+        return ([json.dumps(record)] * 2
+                + [_STRATEGY] * 2 + [_EXPLAIN])
+
+    def _chain(clone_name) -> list[tuple]:
+        with Session(make_engine()) as s:
+            iid = (s.query(Instance)
+                   .filter(Instance.name == clone_name).one().id)
+        with make_engine().begin() as c:
+            rows = c.execute(text(
+                "SELECT version_number, schedule_type, solver_status, "
+                "makespan, payload_hash, payload_json FROM schedule_versions "
+                "WHERE instance_id = :iid ORDER BY version_number"),
+                {"iid": iid}).all()
+        out = []
+        for r in rows:
+            payload = dict(r.payload_json)
+            # clone-scoped bookkeeping: the instance's own name and its
+            # internal version ids (parent_version_id points at THIS
+            # clone's baseline); the stored payload_hash column covers
+            # those raw fields, so we hash the normalized form instead.
+            payload.pop("instance_id", None)
+            payload.pop("parent_version_id", None)
+            out.append(r[:4] + (hashlib.sha256(
+                json.dumps(payload, sort_keys=True).encode()).hexdigest(),))
+        return out
+
+    chains = []
+    for _ in range(2):
+        clone = _fresh_fork()
+        items = list(walk_timeline(
+            script, instance_name=clone, speed="instant",
+            llm_client_factory=lambda: FakeLLMClient(
+                _canned_responses(clone))))
+        assert any(i.get("event") == "done" for i in items)
+        chain = _chain(clone)
+        assert chain, f"{clone}: replay walk committed no versions"
+        chains.append(chain)
+
+    assert chains[0] == chains[1], (
+        f"replay chains diverged:\n{chains[0]}\n{chains[1]}")
 
 
 def test_resume_skips_completed_prefix(tmp_path, demo_scenario):

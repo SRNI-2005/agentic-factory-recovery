@@ -38,7 +38,12 @@ def test_insert_and_check_constraint(clean_db):
     assert raised
 
 
+@pytest.mark.slow
 def test_commit_writes_consume_rows(demo_scenario):
+    """Two baseline commits on a pristine fork; ledger deltas per version.
+    Incompatible with the shared session clone (ledger counts depend on a
+    clone written ONLY by this test's solves) — kept slow/starved from the
+    quick gate."""
     import subprocess
 
     from sqlalchemy import text

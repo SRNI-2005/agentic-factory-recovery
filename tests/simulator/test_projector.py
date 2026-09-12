@@ -101,10 +101,10 @@ def _recovery_caps(session, inst, t: int) -> dict[str, int]:
     return {m["sku"]: m["capacity"] for m in rec["materials"]}
 
 
-def test_classification_boundaries(demo_scenario):
+def test_classification_boundaries(sim_factory_instance):
     from coe.simulator.projector import project_day
 
-    clone = _forked_baseline_clone()
+    clone = sim_factory_instance
     with _sessions(clone) as (s, inst_row):
         ds0 = project_day(s, instance_name=clone, t=0)
     assert ds0.completed_ops == []
@@ -128,12 +128,12 @@ def test_classification_boundaries(demo_scenario):
     assert ds.feed_line().startswith(f"t={baseline_makespan} ")
 
 
-def test_start_boundary_is_in_progress(demo_scenario):
+def test_start_boundary_is_in_progress(sim_factory_instance):
     """Boundary pin: at exactly an entry's start_time the op is IN_PROGRESS
     (start_time <= t < end_time), never COMPLETED."""
     from coe.simulator.projector import project_day
 
-    clone = _forked_baseline_clone()
+    clone = sim_factory_instance
     with _sessions(clone) as (s, inst_row):
         entry, op, job, _machine = _committed_entries(s, inst_row.id)[0]
         ds = project_day(s, instance_name=clone, t=entry.start_time)
@@ -142,7 +142,7 @@ def test_start_boundary_is_in_progress(demo_scenario):
         assert name not in ds.completed_ops
 
 
-def test_effective_stock_matches_builder_arithmetic(demo_scenario):
+def test_effective_stock_matches_builder_arithmetic(sim_factory_instance):
     """Cross-check: project_day's effective stock at t equals the payload
     builder's deducted capacity at the same clock (Task 3 invariants).
 
@@ -153,7 +153,7 @@ def test_effective_stock_matches_builder_arithmetic(demo_scenario):
     loudly on the exact boundary."""
     from coe.simulator.projector import project_day
 
-    clone = _forked_baseline_clone()
+    clone = sim_factory_instance
 
     with _sessions(clone) as (s, inst_row):
         entries = _committed_entries(s, inst_row.id)
