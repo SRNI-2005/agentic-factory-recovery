@@ -66,6 +66,15 @@ Every table row is instance-scoped (`instance_id` FK discipline — no cross-ins
 - Ports are loopback-bound (127.0.0.1) — dev-only anonymous Mosquitto + coe/coe/coe DB creds; never deploy as-is.
 - Engine limits: factory-scale solves are FEASIBLE-at-cap (hint-quality); proven-OPTIMAL only on small/pure instances (MK01 pin). Recovery solves default 180s floor.
 
+## Restarting the dashboard (live-server hygiene)
+
+The dashboard process command is `python -m coe.cli dashboard` — kill with
+`pkill -f "coe.cli dashboard"` (NOT `pkill -f "streamlit run"`, which does not
+match the wrapper and silently leaves the old server bound to the port). After
+restarting, VERIFY freshness: `lsof -nP -iTCP:8501 -sTCP:LISTEN` + `ps -o pid,lstart -p <pid>`
+— a 200 from a stale process looks exactly like success. Bit this session
+twice (2026-09-12/13) behind the ImportError investigation below.
+
 ## Stale bytecode cache (rare, loud when wrong)
 
 Symptom: `ImportError: cannot import name 'X' from '<module>'` despite the
