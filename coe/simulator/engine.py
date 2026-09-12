@@ -143,7 +143,7 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                 committed.append(
                     getattr(result["state"], "committed_version_id", None))
                 yield {"event": "recovery", "t": ev.t, "idx": idx,
-                       "status": result["status"]}
+                       "kind": ev.kind, "status": result["status"]}
             else:
                 from coe.mqtt.ingest import ingest_telemetry_event
 
