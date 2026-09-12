@@ -33,8 +33,12 @@ def _fresh_streamlit():
 
 def _tiny_script(tmp_path):
     p = tmp_path / "tiny.json"
+    # auto_recover=False: these page-flow smoke tests are structured-facts
+    # tests authored pre-amendment (2026-09-13); auto solves are covered
+    # in tests/simulator/test_auto_recover.py.
     p.write_text(json.dumps({
         "name": "tiny", "seed": 1, "horizon_days": 1,
+        "auto_recover": False,
         "events": [{"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
                     "machine_id": "M3"}]}))
     return str(p)
@@ -61,6 +65,7 @@ def _two_event_script(tmp_path):
     p = tmp_path / "tiny2.json"
     p.write_text(json.dumps({
         "name": "tiny2", "seed": 1, "horizon_days": 1,
+        "auto_recover": False,
         "events": [
             {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
              "machine_id": "M3"},

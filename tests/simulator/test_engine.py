@@ -29,8 +29,12 @@ def _canned_disruption() -> str:
     return json.dumps(GOOD_MACHINE)
 
 
-def _timeline(path, events):
-    data = {"name": "t1", "seed": 42, "horizon_days": 1, "events": events}
+def _timeline(path, events, auto_recover=False):
+    # Existing structured-only tests authored BEFORE the auto_recover
+    # amendment (2026-09-13) keep today's facts-only semantics explicitly;
+    # the auto behavior is covered in test_auto_recover.py.
+    data = {"name": "t1", "seed": 42, "horizon_days": 1, "events": events,
+            "auto_recover": auto_recover}
     p = path / "t.json"
     p.write_text(json.dumps(data))
     return str(p)

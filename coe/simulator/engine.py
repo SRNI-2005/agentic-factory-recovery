@@ -97,6 +97,53 @@ def _materialize_restock(instance_name: str, ev: MaterialEvent) -> None:
         s.commit()
 
 
+def _auto_recover_narrative(ev) -> str:
+    """Synthesized report line for an auto-recovery run after a structured
+    event (spec amendment 2026-09-13: disruption -> auto re-plan).
+
+    The resource identifier is prefixed so the degraded translate fallback
+    binds ITS OWN resource: token-free report lines would fall back to the
+    first valid machine (coe/agents/degraded_client.py), which is wrong for
+    WORKER/MATERIAL events. Id-shaped tokens (M3 / W3 / MAT-001) bind by
+    trailing digits via check_narrative_ids."""
+    if isinstance(ev, MachineEvent):
+        token = ev.machine_id
+    elif isinstance(ev, WorkerEvent):
+        token = ev.worker_id
+    elif isinstance(ev, MaterialEvent):
+        token = ev.sku
+    else:
+        token = ev.kind
+    return (f"auto-recover: {token} {ev.kind} {ev.event_type}"
+            f" at minute {ev.t}")
+
+
+def _recovery_step(narrative: str, t: int, idx: int, *,
+                   instance_name: str, llm_client_factory, prior: dict,
+                   committed: list):
+    """One full recovery graph run — the ONLY recovery path of the walk
+    (spec §5 NARRATIVE events + auto_recover Step 2 share it verbatim:
+    same trigger/reference_clock conventions, same _pin_single_worker
+    prior-cell semantics). Generator of feed chunks."""
+    from coe.agents.graph import execute_recovery
+
+    if not prior:
+        _pin_single_worker(prior)
+    client = llm_client_factory() if llm_client_factory else None
+    # Pre-announce: recoveries are live, multi-minute steps (translate +
+    # solver floor). Consumers MUST surface this BEFORE executing so the
+    # UI never looks frozen.
+    yield {"event": "recovery_start", "t": t, "idx": idx,
+           "text": narrative, "live": client is None}
+    result = execute_recovery(
+        instance_name, trigger="CLI", narrative=narrative,
+        reference_clock=t, client=client)
+    committed.append(
+        getattr(result["state"], "committed_version_id", None))
+    yield {"event": "recovery", "t": t, "idx": idx,
+           "kind": "NARRATIVE", "status": result["status"]}
+
+
 def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                   speed="instant", llm_client_factory=None,
                   start_index: int = 0) -> Iterator[dict]:
@@ -105,7 +152,10 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
     Accepts an already-loaded Timeline or a path string (loaded lazily via
     load_timeline). Structured events ingest via the shared Phase 1
     ingestion function (idempotent scripted message ids). NARRATIVE events
-    run the real recovery graph once each, passing reference_clock = event.t.
+    and (when timeline.auto_recover) every structured disruption event run
+    the real recovery graph, passing reference_clock = event.t (spec
+    amendment 2026-09-13: auto_recover defaults True — disruption -> auto
+    re-plan; narrative steps remain optional semantic flair).
     Resume: events with index < start_index are already persisted and are
     simply not re-executed (idempotency would suppress them anyway; skipping
     keeps the log truthful).
@@ -127,23 +177,10 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                 gap = ev.t - timeline.events[idx - 1].t
                 time.sleep(min(gap * pace, 10.0))
             if isinstance(ev, NarrativeEvent):
-                from coe.agents.graph import execute_recovery
-
-                if not prior:
-                    _pin_single_worker(prior)
-                client = llm_client_factory() if llm_client_factory else None
-                # Pre-announce: narrative recoveries are live, multi-minute
-                # steps (translate + solver floor). Consumers MUST surface
-                # this BEFORE executing so the UI never looks frozen.
-                yield {"event": "recovery_start", "t": ev.t, "idx": idx,
-                       "text": ev.text, "live": client is None}
-                result = execute_recovery(
-                    instance_name, trigger="CLI", narrative=ev.text,
-                    reference_clock=ev.t, client=client)
-                committed.append(
-                    getattr(result["state"], "committed_version_id", None))
-                yield {"event": "recovery", "t": ev.t, "idx": idx,
-                       "kind": ev.kind, "status": result["status"]}
+                gen = _recovery_step(
+                    ev.text, ev.t, idx, instance_name=instance_name,
+                    llm_client_factory=llm_client_factory, prior=prior,
+                    committed=committed)
             else:
                 from coe.mqtt.ingest import ingest_telemetry_event
 
@@ -158,6 +195,21 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                 yield {"event": "ingest", "t": ev.t, "idx": idx,
                        "kind": ev.kind, "created": bool(created),
                        "telemetry_id": telemetry_id}
+                # auto_recover amendment: ALL six structured kinds alter the
+                # constraint world (downtime/availability/supply), so each
+                # one followed by the same recovery path. The in-memory
+                # NarrativeEvent-shaped text is never appended to the file
+                # — single path, dual triggers.
+                gen = None
+                if timeline.auto_recover:
+                    yield {"event": "auto_recover", "t": ev.t, "idx": idx}
+                    gen = _recovery_step(
+                        _auto_recover_narrative(ev), ev.t, idx,
+                        instance_name=instance_name,
+                        llm_client_factory=llm_client_factory, prior=prior,
+                        committed=committed)
+            if gen is not None:
+                yield from gen
         yield {"event": "done", "committed": committed}
     finally:
         if prior:

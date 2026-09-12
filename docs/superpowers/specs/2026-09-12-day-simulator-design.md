@@ -108,6 +108,10 @@ schedule state directly — only through the graph and the ingestion function.
 - **Isolation:** `--on-clone` (default for demos) clones the source instance
   per run (`sim-<script>@<8hex>`), matching the e2e harness pattern.
 
+> **[Amendment 2026-09-13]:** auto_recover (timeline field, default True) —
+> every structured disruption event itself triggers a full recovery solve;
+> narrative steps become optional free-text solves.
+
 ## 6. CLI + configuration
 
 ```bash
@@ -120,16 +124,19 @@ Pydantic settings: `SIMULATE_DEFAULT_SPEED` (default 30), `SIMULATE_CLONE`
 
 ## 7. Shipped timeline
 
-`data/timelines/demo_day_01.json` — the full story arc on factory_demo_01
-(seed 42), strictly as concretized by the plan's Task 8 artifact: 08:20 M3
-FAILURE (structured, hours window) → 08:50 narrative recovery ("M3 spindle
-seized", agentic commit) → 10:15 MATERIAL_SHORTAGE MAT-001 (structured
-telemetry) → 10:40 narrative shortage-plan recovery (agentic: expect
-suspend/defer + expedite) → 12:00 MATERIAL_RESTOCK MAT-001 (qty 112; engine
-materializes receipt + RESTOCK ledger row) → 12:30 W3 absent (240 min) →
-13:20 MAT-002 restock (qty 80) → narrative W3-returns recovery (agentic) →
-16:00 M5 planned MAINTENANCE (60 min). Must pass end to end with the current
-stack.
+`data/timelines/demo_day_01.json` — authored to fit INSIDE the schedulable
+day (factory_demo_01 baseline makespan ≈ 406; all events t < 400 —
+amended 2026-09-13 after live demo analysis: a 700-minute arc re-planned
+nothing after minute ~300, and a premature structured FAILURE +
+narrative M3 outage double-killed M3 → SOLVE_INFEASIBLE under auto-fix).
+Arc: t=90 narrative M3 failure recovery (agentic, machine stays out for the
+day) → t=200 MAT-001 shortage telemetry → t=300 MAT-001 restock (112,
+engine materializes receipt + RESTOCK ledger row) → t=330 W3 absent
+60 min → t=380 narrative W3-returns recovery (agentic). Under auto_recover
+(amendment 2026-09-13) the three structured events each auto-solve, so
+the t=230 narrative shortage-plan recovery was deleted as redundant
+(duplicating the t=200 auto solve 30 minutes later). Must pass end to
+end with the current stack.
 
 ## 8. Testing strategy
 

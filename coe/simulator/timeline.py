@@ -77,12 +77,19 @@ _event_kind_map = {
 
 class Timeline(BaseModel):
     """Authored script. `seed` feeds downstream determinism consumers; the
-    engine passes llm clients explicitly (tests) or the settings provider."""
+    engine passes llm clients explicitly (tests) or the settings provider.
+    """
     model_config = ConfigDict(extra="forbid")
     name: str
     seed: int = 42
     horizon_days: int = Field(default=1, ge=1)
     events: list[_TimelineEventUnion]
+    auto_recover: bool = Field(
+        default=True,
+        description=(
+            "After every structured disruption event, run a full recovery "
+            "solve (disruption -> auto re-plan). Narrative steps remain "
+            "available as optional semantic flair."))
 
 
 class _TimelineEventFactory:

@@ -189,6 +189,19 @@ def render() -> None:
         speed = st.sidebar.selectbox("Speed", ["instant", 10, 30, 60],
                                      index=2)
 
+    # auto_recover override (spec amendment 2026-09-13): the toggle wins
+    # over the timeline field when present; reset when the script changes
+    # (same reset-on-script-change pattern as sim_script/sim_speed).
+    if st.session_state.get("sim_auto_recover_script") != tl.name:
+        st.session_state.pop("sim_auto_recover", None)
+    tl.auto_recover = st.sidebar.toggle(
+        "Auto-recover on every structured disruption",
+        key="sim_auto_recover", value=tl.auto_recover,
+        help="On = every structured disruption event is followed by a "
+             "full recovery solve. Off = facts only (narrative steps "
+             "still trigger solves).")
+    st.session_state["sim_auto_recover_script"] = tl.name
+
     use_llm = st.sidebar.toggle(
         "LLM narration (AI strategy + explanation)", value=False,
         help="Off = deterministic auto-fix: translate/strategy/explain "

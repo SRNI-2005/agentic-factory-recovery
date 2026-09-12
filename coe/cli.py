@@ -293,6 +293,9 @@ def _run_simulate(args) -> None:
         err = exc.errors()[0]
         loc = ".".join(str(p) for p in err["loc"])
         raise SystemExit(f"timeline rejected: {loc}: {err['msg']}")
+    if args.auto_recover is not None:
+        # CLI override: None (= use the timeline's field) passes through.
+        tl.auto_recover = args.auto_recover
     from coe.config import get_settings
 
     s = get_settings()
@@ -476,6 +479,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="use the live LLM for agentic steps (default: "
                           "off = deterministic auto-fix, solver-only "
                           "re-plan)")
+    st_.add_argument("--auto-recover",
+                     dest="auto_recover",
+                     action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help="run a full recovery solve after every "
+                          "structured disruption event (default: the "
+                          "timeline's auto_recover field)")
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
