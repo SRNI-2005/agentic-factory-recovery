@@ -1,0 +1,27 @@
+{
+  "name": "demo_day_01",
+  "seed": 42,
+  "horizon_days": 1,
+  "events": [
+    {"t": 110,  "kind": "MACHINE", "event_type": "FAILURE",
+     "machine_id": "M3", "estimated_downtime": 120, "agentic": false},
+    {"t": 140,  "kind": "NARRATIVE",
+     "text": "M3 just jammed and the spindle is useless, expect a long repair window",
+     "severity": "HIGH"},
+    {"t": 240,  "kind": "MATERIAL", "event_type": "MATERIAL_SHORTAGE",
+     "sku": "MAT-001"},
+    {"t": 300,  "kind": "NARRATIVE",
+     "text": "MAT-001 bin empty, delivery stuck at supplier, we need a plan",
+     "severity": "LOW"},
+    {"t": 420,  "kind": "MATERIAL", "event_type": "MATERIAL_RESTOCK",
+     "sku": "MAT-001", "quantity": 112},
+    {"t": 480,  "kind": "WORKER", "event_type": "WORKER_ABSENT",
+     "worker_id": "W3", "duration": 240},
+    {"t": 560,  "kind": "MATERIAL", "event_type": "MATERIAL_RESTOCK",
+     "sku": "MAT-002", "quantity": 80},
+    {"t": 560,  "kind": "NARRATIVE",
+     "text": "W3 just got back from sick leave and is fully available again"},
+    {"t": 700,  "kind": "MACHINE", "event_type": "MAINTENANCE",
+     "machine_id": "M5", "estimated_downtime": 60}
+  ]
+}
