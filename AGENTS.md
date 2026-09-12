@@ -84,3 +84,12 @@ watchdog race wrote the cache post-edit), so Python never reopens the changed
 source. Fix: `find coe tests -name __pycache__ -type d -exec rm -rf {} +` then
 restart. Never debug a fresh failing import before nuking caches first — this
 exact failure bit the day-simulator session (2026-09-12).
+
+## Single dev DB hazard: pytest wipes your demo data
+
+`clean_db` (tests/conftest.py) truncates ALL instance/schedule data, and pytest
+shares the one TimescaleDB (coe/coe@5432/coe) with the interactive dashboard.
+Running any pytest batch while a demo/baseline is live DELETES its schedules
+(vanishing-baseline reports on 2026-09-13 were exactly this — collision between
+the session's test batches and the user's manual simulator runs). Rule: never
+run the suite while a manual demo is in progress, or rebuild baseline after.
