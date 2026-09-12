@@ -56,6 +56,11 @@ co.simulator.projector (advance active schedule to t: COMPLETED/IN_PROGRESS
                         classification + effective-material-stock view for
                         the dashboard rail; the authoritative deduction lives
                         in the Phase 2 payload builder, amended §6.11)
+Projector semantic: playback is physical consumption truth (pre-failure
+                    history included); the recovery builder re-derives
+                    demands — the dashboard rail may therefore exceed the
+                    next solve's effective capacity when a mid-flight
+                    failure exists.
 ```
 
 One-way flow; each unit independently testable. The engine never writes

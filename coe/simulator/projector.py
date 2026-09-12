@@ -8,6 +8,14 @@ Classification boundaries mirror the payload builder's freeze semantics
 t) is IN_PROGRESS. Effective stock equals Task 3's RECOVERY deduction at
 the same clock: initial stock minus BOM consumption of entries started at
 or before t (suspended jobs excluded) plus receipts with available_at <= t.
+
+Playback is physical truth: the consumed-up-to-clock arithmetic counts every
+committed entry that has started, regardless of whether the machine it ran on
+has since been marked FAILED — those bars were physically consumed before the
+failure. The recovery payload builder re-derives its own demands for solving
+(re-classifying pre-failure work); this projector is the audit rail that shows
+real stock, so the dashboard may exceed the next solve's effective capacity
+while a mid-flight failure exists.
 """
 from dataclasses import dataclass, field
 
@@ -23,6 +31,12 @@ from coe.db.models.workers import Worker
 
 @dataclass
 class DayState:
+    """Playback mirror of the committed schedule at ``clock``.
+
+    completed_ops/in_progress list op names from committed entries only;
+    BLOCKED jobs' committed entries still appear (playback mirror).
+    """
+
     clock: int
     completed_ops: list[str] = field(default_factory=list)
     in_progress: list[str] = field(default_factory=list)
