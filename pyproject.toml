@@ -17,6 +17,7 @@ dependencies = [
     "langchain-google-genai>=4.3.5",
     "streamlit>=1.45",
     "plotly>=5.24",
+    "watchdog>=6.0.0",
 ]
 
 [dependency-groups]
