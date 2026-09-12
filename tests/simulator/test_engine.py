@@ -261,3 +261,27 @@ def test_full_replay_does_not_rematerialize_restock(tmp_path, demo_scenario):
     assert [i["created"] for i in items
             if i.get("event") == "ingest"] == [False, False]
     assert _counts() == (restocks, receipts)
+
+
+def test_every_chunk_is_render_safe(tmp_path, demo_scenario):
+    """Contract: every non-terminal chunk carries enough keys for any
+    consumer surface (the Simulate page appends event+kind). Defect
+    2026-09-12: the recovery completion chunk lacked `kind` and crashed
+    the page feed."""
+    from coe.simulator.engine import walk_timeline
+
+    gen = walk_timeline(str(_timeline(tmp_path, [
+        {"t": 100, "kind": "NARRATIVE", "text": "M3 gearbox seized",
+         "severity": "HIGH"}])),
+        instance_name="factory_demo_01", speed="instant",
+        llm_client_factory=lambda: FakeLLMClient(
+            [_canned_disruption(), _STRATEGY, _EXPLAIN] * 3))
+    rendered = []
+    for chunk in gen:
+        if chunk["event"] not in ("recovery_start", "done"):
+            assert "kind" in chunk, f"chunk not render-safe: {chunk}"
+        rendered.append(chunk["event"])
+        if chunk["event"] == "done":
+            break
+    assert "recovery_start" in rendered
+    assert "recovery" in rendered   # completes without a page crash
