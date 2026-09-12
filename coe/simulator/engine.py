@@ -132,6 +132,11 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                 if not prior:
                     _pin_single_worker(prior)
                 client = llm_client_factory() if llm_client_factory else None
+                # Pre-announce: narrative recoveries are live, multi-minute
+                # steps (translate + solver floor). Consumers MUST surface
+                # this BEFORE executing so the UI never looks frozen.
+                yield {"event": "recovery_start", "t": ev.t, "idx": idx,
+                       "text": ev.text, "live": client is None}
                 result = execute_recovery(
                     instance_name, trigger="CLI", narrative=ev.text,
                     reference_clock=ev.t, client=client)

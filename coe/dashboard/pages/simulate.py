@@ -259,6 +259,15 @@ def render() -> None:
                 if chunk["event"] == "done":
                     terminal = chunk
                     break
+                if chunk["event"] == "recovery_start":
+                    # Do NOT advance sim_last_idx — the completion chunk
+                    # advances it. Surface that this step is live.
+                    st.session_state["sim_feed"].append(
+                        f"[t={chunk['t']:>4}] ⏳ recovery starting "
+                        f"({'live LLM' if chunk.get('live') else 'test client'}) —"
+                        " this takes minutes (translate + solver floor)…")
+                    _flush()
+                    continue
                 st.session_state["sim_last_idx"] = chunk["idx"] + 1
                 st.session_state["sim_clock"] = chunk["t"]
                 st.session_state["sim_feed"].append(
@@ -272,7 +281,22 @@ def render() -> None:
             # toggle + Run/Resume buttons.
             gen = walk_timeline(tl, instance_name=active, speed="instant",
                                 start_index=st.session_state["sim_last_idx"])
-            chunk = next(gen, None)
+            # One TERMINAL-BAR step per click: recovery_start chunks are
+            # consumed inline (displayed) until the step's completion chunk
+            # arrives — the generator is only ever closed at a yield
+            # boundary, never mid-recovery.
+            chunk = None
+            while True:
+                chunk = next(gen, None)
+                if chunk is None or chunk["event"] == "recovery_start":
+                    if chunk is not None:
+                        st.session_state["sim_feed"].append(
+                            f"[t={chunk['t']:>4}] ⏳ recovery starting "
+                            f"({'live LLM' if chunk.get('live') else 'test client'}) —"
+                            " this takes minutes…")
+                        _flush()
+                    continue
+                break
             gen.close()
             if chunk is not None:
                 if chunk["event"] == "done":
