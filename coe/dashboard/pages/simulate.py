@@ -271,7 +271,8 @@ def render() -> None:
                 st.session_state["sim_last_idx"] = chunk["idx"] + 1
                 st.session_state["sim_clock"] = chunk["t"]
                 st.session_state["sim_feed"].append(
-                    f"[t={chunk['t']:>4}] {chunk['event']} {chunk['kind']}")
+                    f"[t={chunk['t']:>4}] {chunk['event']} "
+                    f"{chunk.get('kind', '')}".rstrip())
                 _flush()
         else:
             # Paced mode: ONE event per rerender. A fresh generator is
@@ -306,7 +307,7 @@ def render() -> None:
                     st.session_state["sim_clock"] = chunk["t"]
                     st.session_state["sim_feed"].append(
                         f"[t={chunk['t']:>4}] {chunk['event']} "
-                        f"{chunk['kind']}")
+                        f"{chunk.get('kind', '')}".rstrip())
                     _flush()
 
         try:
