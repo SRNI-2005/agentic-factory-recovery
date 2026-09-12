@@ -65,3 +65,13 @@ Every table row is instance-scoped (`instance_id` FK discipline — no cross-ins
 - Scenario builds refuse duplicate names; rebuild requires reset first.
 - Ports are loopback-bound (127.0.0.1) — dev-only anonymous Mosquitto + coe/coe/coe DB creds; never deploy as-is.
 - Engine limits: factory-scale solves are FEASIBLE-at-cap (hint-quality); proven-OPTIMAL only on small/pure instances (MK01 pin). Recovery solves default 180s floor.
+
+## Stale bytecode cache (rare, loud when wrong)
+
+Symptom: `ImportError: cannot import name 'X' from '<module>'` despite the
+function existing in the source file — even after restart. Cause: a `__pycache__/*.pyc`
+file whose mtime stamps NEWER than the source (a killed subprocess or
+watchdog race wrote the cache post-edit), so Python never reopens the changed
+source. Fix: `find coe tests -name __pycache__ -type d -exec rm -rf {} +` then
+restart. Never debug a fresh failing import before nuking caches first — this
+exact failure bit the day-simulator session (2026-09-12).
