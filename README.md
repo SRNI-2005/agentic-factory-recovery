@@ -40,9 +40,9 @@ uv run python -m coe.cli db reset
 
 # 5. Import benchmark data sources
 uv run python -m coe.cli import mk01
-uv run python -m coe.cli import hutter --dir data/raw/nouri-fjspw/extracted/SFJW/
 uv run python -m coe.cli import hutter --dir data/raw/nouri-fjspw/extracted/MFJW/
-uv run python -m coe.cli import gass --dir data/raw/gass/
+uv run python -m coe.cli import hutter --dir data/raw/nouri-fjspw/extracted/SFJW/
+uv run python -m coe.cli import gass
 
 # 6. Build demo scenario
 uv run python -m coe.cli scenario build --name factory_demo_01 --seed 42
@@ -85,13 +85,14 @@ TimescaleDB (versioned schedules, telemetry)
 |-------|--------|---------------|
 | CLI | `coe/cli.py` | ~20 subcommands for all operations |
 | Config | `coe/config.py` | Pydantic Settings from `.env` |
-| Database | `coe/db/` | SQLAlchemy 2.0 + 8 Alembic migrations |
+| Database | `coe/db/` | SQLAlchemy 2.0 + 9 Alembic migrations |
 | Parsers | `coe/parsers/` | MK01, Nouri (Hutter), GASS, Workbook import |
 | Scenario | `coe/scenario/` | Seeded deterministic factory builder |
 | MQTT | `coe/mqtt/` | Kind-routed event ingestion |
 | Solver | `coe/solver/` | CP-SAT engine, payload builder, committer |
 | Agents | `coe/agents/` | LangGraph pipeline with 3 LLM nodes |
-| Dashboard | `coe/dashboard/` | Streamlit cockpit (4 pages) |
+| Simulator | `coe/simulator/` | Scripted-day timeline replay engine |
+| Dashboard | `coe/dashboard/` | Streamlit cockpit (5 pages) |
 | Services | `coe/services/` | Fork, recovery runs, schedule loaders |
 
 ---
@@ -101,8 +102,10 @@ TimescaleDB (versioned schedules, telemetry)
 ### Prerequisites
 
 - Docker & Docker Compose
-- Python 3.14+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
+
+> All commands run from the **repo root**.
 
 ### Infrastructure
 
@@ -178,7 +181,7 @@ Produces: 30 jobs / 8 machines / 168 operations with worker flexibility, setup t
 
 ## Database
 
-**8 Alembic migrations** (authoritative DDL — `create_all` is forbidden). All tables are instance-scoped (`instance_id` FK).
+**9 Alembic migrations** (authoritative DDL — `create_all` is forbidden). All tables are instance-scoped (`instance_id` FK).
 
 ### Key Tables
 
@@ -187,7 +190,7 @@ Produces: 30 jobs / 8 machines / 168 operations with worker flexibility, setup t
 | Core | `instances`, `scenario_sources`, `instance_profiles` |
 | FJSP | `machines`, `jobs`, `operations`, `operation_machine_alternatives`, `setup_times` |
 | Workers | `workers`, `worker_roles`, `operation_machine_worker_times`, `worker_availability_windows`, `worker_absence_windows` |
-| Materials | `materials`, `operation_bom`, `material_receipts` |
+| Materials | `materials`, `operation_bom`, `material_receipts`, `material_transactions` |
 | Telemetry | `telemetry_events` (hypertable), `machine_downtime_windows` |
 | Schedule | `schedule_versions`, `schedule_entries` |
 | Recovery | `recovery_runs`, `recovery_proposals`, `schedule_explanations` |
@@ -252,6 +255,10 @@ uv run python -m coe.cli machine restore --instance factory_demo_01 --machine M1
 
 Everything else in the pipeline is deterministic. LLM usage is confined to these 3 nodes behind a `LLMClient` Protocol — tests inject `FakeLLMClient` with canned responses.
 
+### Natural Language Identifier Mapping
+
+The translate node accepts natural-language names ("machine one", "press 01") and maps them to valid instance identifiers. An **explicit identifier that does not exist** (e.g. `MC-999`) is never silently rewritten — the record is retried with corrective feedback and the run aborts `TRANSLATION_FAILED`; identifier-shaped tokens bind by trailing digits (`MC-04` → `M4`).
+
 ### Closed Strategy Catalog
 
 | Candidate | Effect |
@@ -261,10 +268,6 @@ Everything else in the pipeline is deterministic. LLM usage is confined to these
 | `SUSPEND_JOB` | Block all pending ops of a job |
 | `EXPEDITE_MATERIAL` | Add a material receipt |
 | `WEIGHT_PRESET` | Override alpha/beta objective weights |
-
-### Natural Language Mapping
-
-The translate node accepts natural language names ("machine one", "press 01") and maps them to valid instance identifiers. It queries the DB for actual machine/worker/material IDs and includes them in the prompt.
 
 ---
 
@@ -321,7 +324,21 @@ Also: **Workbook** section for downloading/uploading xlsx workbooks (upload crea
 - Disruption record JSON, per-node wall-clock bar charts
 - Quantum shadow data
 
-#### 4. Benchmarks — Fidelity Report
+#### 4. Simulate — Scripted-Day Playback
+
+Replays an authored disruption timeline (JSON) at accelerated speed:
+
+1. Pick a script (`demo_day_01.json` ships with the repo) and a speed (instant / 10× / 30× / 60×)
+2. Watch the big clock, per-event progress, and live decision feed
+3. Pause / Resume / step through events — resume is replay-safe (no duplicate events)
+4. The walk runs on a `sim-<script>@<8hex>` **clone**, so `factory_demo_01` stays pristine
+5. End-of-walk Gantt transition like the Cockpit
+
+> Requires a baseline on the source instance first (`solve baseline`). Agentic (narrative) steps inside the script need a working LLM provider.
+
+CLI equivalent: `uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30`
+
+#### 5. Benchmarks — Fidelity Report
 
 - Corpus pass rate, exact match rate, threshold MET/MISS
 - Per-case translation data table
@@ -338,9 +355,9 @@ Also: **Workbook** section for downloading/uploading xlsx workbooks (upload crea
 | **Machine** | `FAILURE` | Creates downtime window, sets status=FAILED |
 | **Machine** | `MAINTENANCE` | Creates downtime window |
 | **Worker** | `WORKER_ABSENT` | Creates absence window, sets status=UNAVAILABLE |
-| **Worker` | `WORKER_RETURN` | Closes absence windows, sets status=AVAILABLE |
-| **Material** | `MATERIAL_SHORTAGE` | Telemetry only (triggers recovery) |
-| **Material` | `MATERIAL_RESTOCK` | Telemetry only |
+| **Worker** | `WORKER_RETURN` | Closes absence windows, sets status=AVAILABLE |
+| **Material** | `MATERIAL_SHORTAGE` | Telemetry only (blocking happens at solve time) |
+| **Material** | `MATERIAL_RESTOCK` | Telemetry only (the simulator creates receipts for scripted restocks) |
 
 ### Triggering Disruptions
 
@@ -355,6 +372,15 @@ uv run python -m coe.cli mqtt test-absence --instance factory_demo_01 --worker W
 
 # Material shortage
 uv run python -m coe.cli mqtt test-shortage --instance factory_demo_01 --sku MAT-001 --at 300
+
+# Worker return (closes an open absence)
+uv run python -m coe.cli mqtt test-return --instance factory_demo_01 --worker W3 --at 530
+
+# Material restock (telemetry; scripted-day simulators also create receipts)
+uv run python -m coe.cli mqtt test-restock --instance factory_demo_01 --sku MAT-001 --at 300
+
+# Scripted-day simulation
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30
 ```
 
 #### Via Streamlit Dashboard
@@ -384,7 +410,7 @@ Publish to topic `factory/{instance}/{resource}/{id}/events`:
 ### Expected Results
 
 **Before disruption:**
-- Baseline schedule: FEASIBLE, makespan=406, tardiness=1973
+- Baseline schedule: FEASIBLE, makespan=406 (tardiness varies run-to-run — the operational default searches with 8 workers; set `SOLVER_NUM_SEARCH_WORKERS=1` when comparing numbers)
 - All machines ACTIVE, workers AVAILABLE
 
 **After machine failure (e.g., M3 at t=512):**
@@ -410,7 +436,7 @@ Publish to topic `factory/{instance}/{resource}/{id}/events`:
 ### 1. Configure Tour
 - Open dashboard at http://127.0.0.1:8501
 - Browse the **Configure** page tabs: Schedule (Gantt), Machines, Workers, Materials, Jobs
-- Note the baseline metrics: makespan=406, tardiness=1973
+- Note the baseline metrics: makespan=406 (tardiness varies per run — see the workers-knob note in Disruptions section)
 
 ### 2. Trigger a Disruption
 ```bash
@@ -481,6 +507,11 @@ uv run python -m coe.cli mqtt listen
 uv run python -m coe.cli mqtt test-failure --instance I --machine M3 --at 512
 uv run python -m coe.cli mqtt test-absence --instance I --worker W3 --at 480 [--duration N]
 uv run python -m coe.cli mqtt test-shortage --instance I --sku MAT-001 --at 300
+uv run python -m coe.cli mqtt test-return --instance I --worker W3 --at 530
+uv run python -m coe.cli mqtt test-restock --instance I --sku MAT-001 --at 300
+
+# Day Simulator
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--from N] [--on-clone]
 
 # Dashboard
 uv run python -m coe.cli dashboard [--port 8501]
@@ -491,10 +522,10 @@ uv run python -m coe.cli dashboard [--port 8501]
 ## Testing
 
 ```bash
-# Full suite (~220 tests, ~5 min)
+# Full suite (incl. slow pins, ~10 min)
 uv run pytest -q
 
-# Quick gate — skip MQTT + slow (~214 tests, ~2.5 min)
+# Quick gate — skip MQTT + slow (~510 tests, ~8 min)
 uv run pytest -m "not mqtt and not slow"
 
 # Skip only MQTT-dependent tests
@@ -527,10 +558,11 @@ uv run pytest -m llm
 | Phase | Status | Notes |
 |-------|--------|-------|
 | 1. Infrastructure & Data Ingestion | **COMPLETE** | All 11 acceptance criteria green |
-| 2. Classical CP-SAT Engine | **COMPLETE** | MK01 OPTIMAL; factory FEASIBLE via warm start |
-| 3. Agentic Middleware | **COMPLETE** | Full LangGraph pipeline + CLI + dashboard |
-| 4. Quantum Formulation | Design doc | QAOA research benchmark |
-| 5. Integration Benchmarking | Design doc | — |
+| 2. Classical CP-SAT Engine | **COMPLETE** | MK01 OPTIMAL; factory FEASIBLE via two-phase warm start |
+| 3. Agentic Middleware | **COMPLETE** | Full LangGraph pipeline + CLI + Streamlit cockpit |
+| — Day Simulator (scripted-day replay) | **COMPLETE** (on `day-simulator` branch, pending merge) | Timeline engine, materials ledger, Simulate page |
+| 4. Quantum Formulation | Spec approved | QAOA research benchmark (see specs/) |
+| 5. Integration Benchmarking | Spec approved | — |
 
 ---
 
