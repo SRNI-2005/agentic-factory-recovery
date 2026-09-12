@@ -1,6 +1,16 @@
+import os
 from pathlib import Path
 
-import pytest
+# MUST run before any coe import: pytest targets the DEDICATED TEST
+# database (:5433, container `timescaledb-test`), never the interactive
+# demo DB (:5432). An explicit user override wins only in CI-like
+# scenarios where someone wires a different test DB.
+os.environ["DATABASE_URL"] = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://coe:coe@localhost:5433/coe",
+)
+
+import pytest  # noqa: E402
 
 from coe.db.admin import reset_database  # noqa: F401  (re-exported for fixtures)
 from coe.config import get_settings

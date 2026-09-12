@@ -87,9 +87,10 @@ exact failure bit the day-simulator session (2026-09-12).
 
 ## Single dev DB hazard: pytest wipes your demo data
 
-`clean_db` (tests/conftest.py) truncates ALL instance/schedule data, and pytest
-shares the one TimescaleDB (coe/coe@5432/coe) with the interactive dashboard.
-Running any pytest batch while a demo/baseline is live DELETES its schedules
-(vanishing-baseline reports on 2026-09-13 were exactly this — collision between
-the session's test batches and the user's manual simulator runs). Rule: never
-run the suite while a manual demo is in progress, or rebuild baseline after.
+pytest owns a DEDICATED test database on :5433 (`timescaledb-test`, db coe —
+tests/conftest.py overrides `DATABASE_URL` before any coe import; CI-style
+override via TEST_DATABASE_URL). The interactive demo DB (:5432) is therefore
+never touched by test batches. History: before the separation, `clean_db`
+truncated the SHARED DB and pytest batches erased live demo schedules
+(vanishing-baseline reports on 2026-09-13 — collision between test batches and
+manual simulator runs). `docker compose up -d` brings up both DBs.

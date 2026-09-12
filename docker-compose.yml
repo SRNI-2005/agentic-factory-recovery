@@ -15,6 +15,25 @@ services:
       timeout: 3s
       retries: 12
 
+  # Dedicated TEST database on port 5433 (db coe via the same creds).
+  # pytest targets this via tests/conftest.py's DATABASE_URL override —
+  # test batches NEVER touch the interactive demo data on :5432.
+  timescaledb-test:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: coe
+      POSTGRES_PASSWORD: coe
+      POSTGRES_DB: coe
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - tsdata-test:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coe -d coe"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
@@ -29,3 +48,4 @@ services:
 
 volumes:
   tsdata:
+  tsdata-test:
