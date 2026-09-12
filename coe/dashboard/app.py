@@ -9,6 +9,7 @@ def main() -> None:
     from coe.dashboard.pages.cockpit import render as render_cockpit
     from coe.dashboard.pages.configure import render as render_configure
     from coe.dashboard.pages.runs import render as render_runs
+    from coe.dashboard.pages.simulate import render as render_simulate
     from coe.db.session import session_scope
 
     st.set_page_config(
@@ -50,6 +51,7 @@ def main() -> None:
         st.Page(render_configure, title="Configure", icon="🔧", url_path="configure"),
         st.Page(render_runs, title="Runs", icon="📊", url_path="runs"),
         st.Page(render_benchmarks, title="Benchmarks", icon="📈", url_path="benchmarks"),
+        st.Page(render_simulate, title="Simulate", icon="🎬", url_path="simulate"),
     ]
     page = st.navigation(pages)
     page.run()
