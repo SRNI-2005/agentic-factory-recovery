@@ -285,26 +285,44 @@ def _run_simulate(args) -> None:
 
     try:
         tl = load_timeline(args.file)
-    except (TimelineError, ValidationError) as exc:
+    except TimelineError as exc:
+        raise SystemExit(f"timeline rejected: {exc}")
+    except ValidationError as exc:
         # Deviation vs brief: pydantic schema violations surface as
         # ValidationError, not TimelineError — both must exit cleanly.
-        raise SystemExit(f"timeline rejected: {exc}")
+        err = exc.errors()[0]
+        loc = ".".join(str(p) for p in err["loc"])
+        raise SystemExit(f"timeline rejected: {loc}: {err['msg']}")
     from coe.config import get_settings
 
     s = get_settings()
     speed = args.speed or f"{s.simulate_default_speed}"
+    if speed != "instant":
+        try:
+            if int(speed) <= 0:
+                raise ValueError(speed)
+        except ValueError:
+            raise SystemExit(
+                f"invalid speed: {speed} (instant or a positive integer)")
     inst_name = args.instance or "factory_demo_01"
     want_clone = s.simulate_clone if args.on_clone is None else args.on_clone
     if want_clone:
         from sqlalchemy.orm import Session
+
+        from sqlalchemy.exc import NoResultFound
 
         from coe.db.models.provenance import Instance
         from coe.db.session import make_engine
         from coe.services.fork import ForkError, fork_instance
 
         with Session(make_engine()) as session:
-            source = (session.query(Instance)
-                      .filter(Instance.name == inst_name).one())
+            try:
+                source = (session.query(Instance)
+                          .filter(Instance.name == inst_name).one())
+            except NoResultFound:
+                raise SystemExit(
+                    f"unknown instance: {inst_name} — source must exist "
+                    "to fork")
             try:
                 forked = fork_instance(
                     session, source,

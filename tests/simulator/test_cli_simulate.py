@@ -30,3 +30,23 @@ def test_schema_error_exits_1_with_message(tmp_path, demo_scenario):
         {"t": 5, "kind": "NARRATIVE", "text": "hi", "at": 5}]}))
     r = _run("--file", str(bad))
     assert r.returncode != 0 and "Extra inputs" in (r.stdout + r.stderr)
+
+
+def test_unknown_instance_exits_cleanly(tmp_path, demo_scenario):
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"name": "x", "events": [
+        {"t": 5, "kind": "NARRATIVE", "text": "hi"}]}))
+    r = _run("--file", str(ok), "--instance", "bogus")
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "unknown instance" in out
+    assert "Traceback" not in out
+
+
+def test_bad_speed_exits_cleanly(tmp_path, demo_scenario):
+    ok = tmp_path / "ok.json"
+    ok.write_text(json.dumps({"name": "x", "events": [
+        {"t": 5, "kind": "NARRATIVE", "text": "hi"}]}))
+    r = _run("--file", str(ok), "--speed", "fast")
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and "invalid speed" in out
+    assert "Traceback" not in out
