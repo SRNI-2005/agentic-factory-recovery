@@ -362,7 +362,7 @@ Runtime inventory audit log. It is not populated by Phase 1 because no schedule 
 - `timestamp`
 - `transaction_type`
 
-> **[Amendment 2026-09-12 — day simulator]:** the reserved table is now built (migration #7); CONSUME rows are written by the Phase 2 committer, RESTOCK rows by the day-simulator engine; REFILL is reserved with no current producer.
+> **[Amendment 2026-09-12 — day simulator]:** the reserved table is now built (migration #9); CONSUME rows are written by the Phase 2 committer, RESTOCK rows by the day-simulator engine; REFILL is reserved with no current producer.
 
 ### 6.5 Machine Downtime and Telemetry
 

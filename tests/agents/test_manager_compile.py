@@ -108,7 +108,12 @@ def test_valid_candidate_applied_invalid_filtered(world):
     assert len(applied) == 1                  # INVALID never reached applier
 
 
-def test_candidate_target_absent_from_payload_skipped(world):
+@pytest.mark.parametrize("cand", [
+    {"type": "DEFER_JOB", "job_id": "J-A", "release_offset": 15},
+    {"type": "SUSPEND_JOB", "job_id": "J-A"},
+    {"type": "TARDINESS_WEIGHT", "job_id": "J-A", "weight": 2.0},
+], ids=["defer", "suspend", "weight"])
+def test_candidate_target_absent_from_payload_skipped(world, cand):
     """Persisted-suspension crash guard: a catalog-VALID candidate whose
     target job is absent from the recovery payload (persisted BLOCKED from
     a prior run's suspension memory) is skipped with a STRATEGY_SKIPPED
@@ -122,7 +127,6 @@ def test_candidate_target_absent_from_payload_skipped(world):
               .filter(Job.instance_id == world, Job.name == "J-A").one())
         ja.status = "BLOCKED"
 
-    cand = {"type": "DEFER_JOB", "job_id": "J-A", "release_offset": 15}
     st = _state(
         strategy_candidates=[{"candidate": cand, "round": 1}],
         round_verdicts=[
@@ -136,6 +140,9 @@ def test_candidate_target_absent_from_payload_skipped(world):
     skipped = [w for w in out.compiled_payload["warnings"]
                if w["type"] == "STRATEGY_SKIPPED"]
     assert len(skipped) == 1 and skipped[0]["candidate"] == cand
+    if cand["type"] == "TARDINESS_WEIGHT":
+        weights = out.compiled_payload.get("job_tardiness_weights") or {}
+        assert "J-A" not in weights
 
 
 def test_weight_derivation_uses_post_preset_beta(world):

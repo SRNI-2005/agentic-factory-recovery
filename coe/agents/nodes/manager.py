@@ -77,10 +77,11 @@ def run_manager_compile(state: RecoveryState) -> RecoveryState:
     ]
     # Suspension-memory guard: build_payload drops persisted-BLOCKED jobs,
     # but catalog validation only checks the DB row — a candidate targeting
-    # such a job is VALID at emission time yet useless here. Applier's
-    # contract is "no validation lives here" (its contract-breaking KeyError
-    # would kill the whole run), so crash-unsafe candidates are skipped with
-    # an audit warning instead of applied.
+    # such a job is VALID at emission time yet useless here. DEFER_JOB /
+    # SUSPEND_JOB would crash the applier (its contract-breaking KeyError
+    # would kill the whole run); TARDINESS_WEIGHT would not crash but would
+    # silently attach a weight to a job absent from the payload — both are
+    # skipped with an audit warning instead of applied.
     payload_job_ids = {j["job_id"] for j in payload["jobs"]}
     dropped, kept = [], []
     for cand in applicable:

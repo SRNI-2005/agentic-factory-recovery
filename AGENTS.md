@@ -33,14 +33,14 @@ uv run python -m coe.cli recover --instance I --narrative "..." [--at MIN]
 uv run python -m coe.cli explain --instance I
 uv run python -m coe.cli benchmark fidelity --corpus data/corpus/fidelity-seed42 --seed 42
 uv run python -m coe.cli mqtt listen
-uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--on-clone]
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--on-clone]   # clone is default-on (disable via settings.simulate_clone); run `solve baseline` on the source instance first
 ```
 
 Use `uv` exclusively. Never pip, never system Python. Working from repo root is assumed (paths in tests are CWD-relative).
 
 ## Architecture
 
-- `coe/db/` — SQLAlchemy 2.0 models + Alembic migrations (7 migrations; **Alembic is authoritative DDL — `create_all` is forbidden**). Raw SQL only for TimescaleDB-specific ops (hypertable, advisory locks).
+- `coe/db/` — SQLAlchemy 2.0 models + Alembic migrations (9 migrations; **Alembic is authoritative DDL — `create_all` is forbidden**). Raw SQL only for TimescaleDB-specific ops (hypertable, advisory locks).
 - `coe/parsers/` — MK01 (Brandimarte), Nouri (FJSSP-W worker flexibility), GASS (xlsx → instance_profiles). Each import is atomic, checksum-idempotent (changed checksum ⇒ new `name@<8hex>` instance).
 - `coe/scenario/` — seeded deterministic builder: `factory_demo_01` = 30 jobs / 8 machines / 168 ops sampled from MK01-derived profiles + Nouri worker layer + GASS setups + synthetic materials. Byte-reproducible for a given seed.
 - `coe/mqtt/` — kind-routed ingestion: MACHINE (downtime windows + FAILED status), WORKER (absence windows + UNAVAILABLE, RETURN closes), MATERIAL (telemetry only). All events idempotent on `message_id`; interval unions under per-resource advisory locks; subscriber validates topic ≡ payload.
