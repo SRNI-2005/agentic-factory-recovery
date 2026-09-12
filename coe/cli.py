@@ -305,6 +305,32 @@ def _run_simulate(args) -> None:
             raise SystemExit(
                 f"invalid speed: {speed} (instant or a positive integer)")
     inst_name = args.instance or "factory_demo_01"
+    # Pre-flight (order matters): unknown instance first, then the
+    # narrative baseline requirement (§4.4).
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.session import make_engine
+
+    with Session(make_engine()) as session:
+        known = session.execute(text(
+            "SELECT COUNT(*) FROM instances WHERE name = :n"),
+            {"n": inst_name}).scalar_one()
+        if known == 0:
+            raise SystemExit(f"unknown instance: {inst_name}")
+        if any(ev.kind == "NARRATIVE" for ev in tl.events):
+            n = session.execute(text(
+                "SELECT COUNT(*) FROM schedule_versions sv "
+                "JOIN instances i ON i.id = sv.instance_id "
+                "WHERE i.name = :n AND sv.solver_status IN "
+                "('OPTIMAL','FEASIBLE') AND sv.rolled_back = false"),
+                {"n": inst_name}).scalar_one()
+            if n == 0:
+                raise SystemExit(
+                    f"`{inst_name}` has no active schedule — run "
+                    f"`uv run python -m coe.cli solve baseline --instance "
+                    f"{inst_name}` first (narrative events freeze from it,"
+                    " §4.4)")
     want_clone = s.simulate_clone if args.on_clone is None else args.on_clone
     if want_clone:
         from sqlalchemy.orm import Session

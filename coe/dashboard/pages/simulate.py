@@ -39,6 +39,23 @@ def _fork_or_default(instance_name: str, script_name: str) -> str:
         return forked.name
 
 
+def _active_exists(instance_name: str) -> bool:
+    """True when the source instance has a non-rolled-back feasible version
+    (the recovery pre-flight §4.4 contract)."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.session import make_engine
+
+    with Session(make_engine()) as session:
+        n = session.execute(text(
+            "SELECT COUNT(*) FROM schedule_versions sv "
+            "JOIN instances i ON i.id = sv.instance_id "
+            "WHERE i.name = :n AND sv.solver_status IN ('OPTIMAL','FEASIBLE') "
+            "AND sv.rolled_back = false"), {"n": instance_name}).scalar_one()
+    return n > 0
+
+
 def _fetch_active_entries(instance_name: str) -> list[dict]:
     """Committed active schedule entries (mirror of cockpit's helper)."""
     from sqlalchemy import text
@@ -226,6 +243,19 @@ def render() -> None:
     if start_run:
         active_prev = st.session_state["sim_active_instance"]
         if finished or active_prev is None:
+            # Pre-flight: only narrative steps need an active baseline ON
+            # THE SOURCE (the fork inherits it); structured-only scripts
+            # work baseline-free (ingest + projector are self-sufficient).
+            missing_baseline = (
+                any(ev.kind == "NARRATIVE" for ev in tl.events)
+                and not _active_exists(instance_name))
+            if missing_baseline:
+                st.error(
+                    f"`{instance_name}` has no active schedule — run "
+                    f"`uv run python -m coe.cli solve baseline --instance "
+                    f"{instance_name}` first (every narrative event needs "
+                    "a baseline to freeze from, §4.4).")
+                st.stop()
             try:
                 active = _fork_or_default(instance_name, tl.name)
             except ValueError as exc:
@@ -283,9 +313,16 @@ def render() -> None:
                     continue
                 st.session_state["sim_last_idx"] = chunk["idx"] + 1
                 st.session_state["sim_clock"] = chunk["t"]
-                st.session_state["sim_feed"].append(
-                    f"[t={chunk['t']:>4}] {chunk['event']} "
-                    f"{chunk.get('kind', '')}".rstrip())
+                if chunk["event"] == "recovery":
+                    status = chunk.get("status", "?")
+                    mark = "✓" if status == "COMMITTED" else f"✗ {status}"
+                    st.session_state["sim_feed"].append(
+                        f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
+                        f"{mark}")
+                else:
+                    st.session_state["sim_feed"].append(
+                        f"[t={chunk['t']:>4}] {chunk['event']} "
+                        f"{chunk.get('kind', '')}".rstrip())
                 _flush()
         else:
             # Paced mode: ONE event per rerender. A fresh generator is
@@ -319,9 +356,17 @@ def render() -> None:
                 else:
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
                     st.session_state["sim_clock"] = chunk["t"]
-                    st.session_state["sim_feed"].append(
-                        f"[t={chunk['t']:>4}] {chunk['event']} "
-                        f"{chunk.get('kind', '')}".rstrip())
+                    if chunk["event"] == "recovery":
+                        status = chunk.get("status", "?")
+                        mark = ("✓" if status == "COMMITTED"
+                                else f"✗ {status}")
+                        st.session_state["sim_feed"].append(
+                            f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
+                            f"{mark}")
+                    else:
+                        st.session_state["sim_feed"].append(
+                            f"[t={chunk['t']:>4}] {chunk['event']} "
+                            f"{chunk.get('kind', '')}".rstrip())
                     _flush()
 
         try:

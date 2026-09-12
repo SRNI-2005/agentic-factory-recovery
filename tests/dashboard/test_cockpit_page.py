@@ -21,12 +21,14 @@ def _make_st():
     st.info = MagicMock()
     st.stop = MagicMock(side_effect=SystemExit)
     st.markdown = MagicMock()
+    # __exit__ must return False: a truthy exit swallows exceptions raised
+    # inside the context, masking real failures as silent no-op renders.
     st.chat_message = MagicMock(return_value=MagicMock(
-        __enter__=lambda s: s, __exit__=MagicMock()))
+        __enter__=lambda s: s, __exit__=MagicMock(return_value=False)))
     st.chat_input = MagicMock(return_value=None)
     st.status = MagicMock(return_value=MagicMock(
         __enter__=lambda s: s,
-        __exit__=MagicMock(),
+        __exit__=MagicMock(return_value=False),
         update=MagicMock()))
     st.empty = MagicMock(return_value=MagicMock(markdown=MagicMock()))
     st.columns = MagicMock(return_value=[MagicMock() for _ in range(3)])
@@ -152,6 +154,8 @@ def test_render_committed_recovery():
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
+             patch("coe.dashboard.pages.cockpit._derive_reference_clock",
+                   return_value=0), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming) as mock_exec, \
              patch("coe.dashboard.pages.cockpit._render_explanation"), \
@@ -193,6 +197,8 @@ def test_render_unknown_outcome():
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
+             patch("coe.dashboard.pages.cockpit._derive_reference_clock",
+                   return_value=0), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming), \
              patch("coe.dashboard.pages.cockpit._fetch_active_entries",
@@ -228,6 +234,8 @@ def test_render_infeasible_outcome():
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
+             patch("coe.dashboard.pages.cockpit._derive_reference_clock",
+                   return_value=0), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming), \
              patch("coe.dashboard.pages.cockpit._fetch_active_entries",
@@ -265,6 +273,8 @@ def test_render_no_explanation():
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
+             patch("coe.dashboard.pages.cockpit._derive_reference_clock",
+                   return_value=0), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming), \
              patch("coe.dashboard.pages.cockpit._fetch_active_entries",
@@ -344,6 +354,7 @@ def test_streaming_feed_renders_progressive_lines():
 
     mock_state = MagicMock()
     mock_state.solution = None
+    mock_state.committed_version_id = None
     mock_result = {"status": "COMMITTED", "state": mock_state, "run_id": 9}
 
     def _fake_streaming(*args, **kwargs):
@@ -358,6 +369,8 @@ def test_streaming_feed_renders_progressive_lines():
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
+             patch("coe.dashboard.pages.cockpit._derive_reference_clock",
+                   return_value=0), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming), \
              patch("coe.dashboard.pages.cockpit._fetch_active_entries",
@@ -398,6 +411,8 @@ def test_streaming_unknown_preserves_budget_starved_info():
     try:
         with patch("coe.agents.llm_client.require_llm_config"), \
              patch("coe.config.get_settings"), \
+             patch("coe.dashboard.pages.cockpit._derive_reference_clock",
+                   return_value=0), \
              patch("coe.agents.graph.execute_recovery_streaming",
                    side_effect=_fake_streaming), \
              patch("coe.dashboard.pages.cockpit._fetch_active_entries",

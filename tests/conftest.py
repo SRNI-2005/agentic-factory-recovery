@@ -6,6 +6,26 @@ from coe.db.admin import reset_database  # noqa: F401  (re-exported for fixtures
 from coe.config import get_settings
 
 
+@pytest.fixture(autouse=True)
+def _isolate_settings_bindings():
+    """Prevent cross-test pollution of the settings caching layer.
+
+    Tests that monkeypatch/patch ``coe.config.get_settings`` can leave a
+    stale binding behind if another module lazily does ``from coe.config
+    import get_settings`` while the patch is active (e.g. ``make_engine``
+    imports lazily inside ``coe.db.session``). Snapshot the pristine
+    bindings before each test and restore them after; also clear the
+    ``get_settings`` lru_cache so env/tests that prime it never leak
+    cached values across tests.
+    """
+    import coe.db.session as db_session
+
+    pristine_db_session_get_settings = db_session.get_settings
+    yield
+    db_session.get_settings = pristine_db_session_get_settings
+    get_settings.cache_clear()
+
+
 @pytest.fixture(scope="session")
 def db_url() -> str:
     return get_settings().database_url
