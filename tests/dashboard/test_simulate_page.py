@@ -90,6 +90,8 @@ def _make_st():
     st.sidebar = types.SimpleNamespace(
         selectbox=MagicMock(return_value=None),
         columns=MagicMock(return_value=[col_run, col_pause]),
+        # Simulate page toggle (LLM narration); False = degraded auto-fix.
+        toggle=MagicMock(return_value=False),
         _col_run=col_run, _col_pause=col_pause)
     st.status = MagicMock(return_value=MagicMock(
         __enter__=lambda s: s,

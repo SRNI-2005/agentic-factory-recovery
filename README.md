@@ -334,9 +334,9 @@ Replays an authored disruption timeline (JSON) at accelerated speed:
 4. The walk runs on a `sim-<script>@<8hex>` **clone**, so `factory_demo_01` stays pristine
 5. End-of-walk Gantt transition like the Cockpit
 
-> Requires a baseline on the source instance first (`solve baseline`). Agentic (narrative) steps inside the script need a working LLM provider.
+> Requires a baseline on the source instance first (`solve baseline`). **LLM narration off (default) = solver-only auto-fix**: translate/strategy/explain are answered by the deterministic degraded client, no LLM anywhere. Toggle it on to use the live provider for AI strategy + explanation.
 
-CLI equivalent: `uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30`
+CLI equivalent: `uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30` (add `--llm` to use the live LLM; the default is `--no-llm`, i.e. solver-only auto-fix)
 
 #### 5. Benchmarks — Fidelity Report
 
@@ -380,7 +380,8 @@ uv run python -m coe.cli mqtt test-return --instance factory_demo_01 --worker W3
 uv run python -m coe.cli mqtt test-restock --instance factory_demo_01 --sku MAT-001 --at 300
 
 # Scripted-day simulation
-uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30            # default: --no-llm (deterministic auto-fix, no LLM)
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30 --llm     # live LLM narration
 ```
 
 #### Via Streamlit Dashboard
@@ -511,7 +512,7 @@ uv run python -m coe.cli mqtt test-return --instance I --worker W3 --at 530
 uv run python -m coe.cli mqtt test-restock --instance I --sku MAT-001 --at 300
 
 # Day Simulator
-uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--from N] [--on-clone]
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--from N] [--on-clone] [--llm|--no-llm]   # default --no-llm: solver-only auto-fix
 
 # Dashboard
 uv run python -m coe.cli dashboard [--port 8501]

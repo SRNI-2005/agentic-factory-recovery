@@ -171,6 +171,18 @@ def render() -> None:
     if speed is None:
         speed = st.sidebar.selectbox("Speed", ["instant", 10, 30, 60],
                                      index=2)
+
+    use_llm = st.sidebar.toggle(
+        "LLM narration (AI strategy + explanation)", value=False,
+        help="Off = deterministic auto-fix: translate/strategy/explain "
+             "are answered by the degraded client; the solver alone "
+             "re-plans. On = live provider.")
+    if use_llm:
+        llm_client_factory = None    # None = live provider (§9)
+    else:
+        from coe.agents.degraded_client import DegradedLLMClient
+
+        llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
     if speed != "instant":
         try:
             speed_val = int(speed)
@@ -254,6 +266,7 @@ def render() -> None:
             # safe inside a st.status block (no threading; RunManager lesson).
             for chunk in walk_timeline(
                 tl, instance_name=active, speed="instant",
+                llm_client_factory=llm_client_factory,
                 start_index=st.session_state["sim_last_idx"],
             ):
                 if chunk["event"] == "done":
@@ -264,7 +277,7 @@ def render() -> None:
                     # advances it. Surface that this step is live.
                     st.session_state["sim_feed"].append(
                         f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                        f"({'live LLM' if chunk.get('live') else 'test client'}) —"
+                        f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
                         " this takes minutes (translate + solver floor)…")
                     _flush()
                     continue
@@ -281,6 +294,7 @@ def render() -> None:
             # instant — the page owns the pacing clock via the pause
             # toggle + Run/Resume buttons.
             gen = walk_timeline(tl, instance_name=active, speed="instant",
+                                llm_client_factory=llm_client_factory,
                                 start_index=st.session_state["sim_last_idx"])
             # One TERMINAL-BAR step per click: recovery_start chunks are
             # consumed inline (displayed) until the step's completion chunk
@@ -293,7 +307,7 @@ def render() -> None:
                     if chunk is not None:
                         st.session_state["sim_feed"].append(
                             f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                            f"({'live LLM' if chunk.get('live') else 'test client'}) —"
+                            f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
                             " this takes minutes…")
                         _flush()
                     continue

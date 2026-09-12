@@ -132,6 +132,16 @@ def _inst_id(session, instance_name: str) -> int:
 _RESOURCE_ID_TOKEN = re.compile(r"\b(?:MAT-\d+|MC-?\d+|M-?\d+|W-?\d+)\b")
 
 
+def resource_id_tokens(text: str) -> set[str]:
+    """Public wrapper: identifier-shaped tokens (M3, MC-999, W10, MAT-001).
+
+    The underscore-private regex is shared with the deterministic degraded
+    client (coe/agents/degraded_client.py), which needs the SAME token
+    convention as check_narrative_ids — never import the private name.
+    """
+    return {t.strip() for t in _RESOURCE_ID_TOKEN.findall(text)}
+
+
 def _norm_id(text: str) -> str:
     return re.sub(r"[-_ ]", "", text).upper()
 

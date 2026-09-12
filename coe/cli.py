@@ -334,7 +334,17 @@ def _run_simulate(args) -> None:
             session.commit()
             inst_name = forked.name
     print(f"simulating '{tl.name}' on {inst_name} at {speed}")
+    if not args.llm:
+        # Agentic steps run without any LLM (auto-fix: solver-only
+        # re-plan) — the degraded client answers translate/strategy/
+        # explain deterministically, behind the same protocol.
+        from coe.agents.degraded_client import DegradedLLMClient
+
+        factory = lambda: DegradedLLMClient()  # noqa: E731
+    else:
+        factory = None      # None = live provider (execute_recovery §9)
     for chunk in walk_timeline(tl, instance_name=inst_name, speed=speed,
+                               llm_client_factory=factory,
                                start_index=args.from_index):
         print(f"[{chunk.get('t', '—'):>4}] {chunk}")
 
@@ -435,6 +445,11 @@ def build_parser() -> argparse.ArgumentParser:
     st_.add_argument("--instance", default=None)
     st_.add_argument("--on-clone", dest="on_clone", action="store_true",
                      default=None)
+    st_.add_argument("--llm", action=argparse.BooleanOptionalAction,
+                     default=False,
+                     help="use the live LLM for agentic steps (default: "
+                          "off = deterministic auto-fix, solver-only "
+                          "re-plan)")
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)

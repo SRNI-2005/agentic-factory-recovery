@@ -285,3 +285,73 @@ def test_every_chunk_is_render_safe(tmp_path, demo_scenario):
             break
     assert "recovery_start" in rendered
     assert "recovery" in rendered   # completes without a page crash
+
+
+def test_degraded_walk_commits_without_llm_traces(tmp_path, demo_scenario):
+    """LLM-narration toggle OFF (default): llm_client_factory returns
+    DegradedLLMClient — the walk commits a recovery version through the
+    real graph with zero recovery_proposals (no strategy candidates,
+    §3.3 no-strategy degradation) and a schedule_explanation row
+    carrying the degraded constant text."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.agents.degraded_client import DegradedLLMClient
+    from coe.db.models.provenance import Instance
+    from coe.db.session import make_engine
+    from coe.services.fork import fork_instance
+    from coe.simulator.engine import walk_timeline
+
+    with Session(make_engine()) as s:
+        source = (s.query(Instance)
+                  .filter(Instance.name == "factory_demo_01").one())
+        forked = fork_instance(s, source)
+        s.commit()
+        clone = forked.name
+    r = subprocess.run(
+        ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
+         "--instance", clone, "--workers", "1"],
+        check=True, capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stderr
+
+    script = _timeline(tmp_path, [
+        {"t": 512, "kind": "NARRATIVE", "text": NARRATIVE,
+         "severity": "HIGH"}])
+    items = list(walk_timeline(
+        script, instance_name=clone, speed="instant",
+        llm_client_factory=lambda: DegradedLLMClient()))
+    assert any(i.get("event") == "recovery_start"
+               and i.get("live") is False for i in items)
+    committed = [c["committed"] for c in items if c.get("event") == "done"]
+    assert committed and committed[0], "degraded walk committed nothing"
+
+    with Session(make_engine()) as s:
+        iid = (s.query(Instance)
+               .filter(Instance.name == clone).one().id)
+    with make_engine().begin() as c:
+        proposals = c.execute(text(
+            "SELECT COUNT(*) FROM recovery_proposals WHERE "
+            "instance_id = :iid"), {"iid": iid}).scalar()
+        explanation = c.execute(text(
+            "SELECT se.rationale FROM schedule_explanations se "
+            "JOIN schedule_versions sv ON sv.id = se.version_id "
+            "WHERE sv.instance_id = :iid"), {"iid": iid}).scalar_one_or_none()
+    assert proposals == 0
+    assert explanation is not None
+    assert "LLM disabled" in explanation
+
+
+def test_cli_simulate_llm_flag_default_off():
+    """`simulate timeline --llm/--no-llm` — default is --no-llm (auto-fix
+    per the toggle contract); no live call is made, parser default only."""
+    from coe.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["simulate", "timeline", "--file", "x.json"])
+    assert args.llm is False
+    args = build_parser().parse_args(
+        ["simulate", "timeline", "--file", "x.json", "--llm"])
+    assert args.llm is True
+    args = build_parser().parse_args(
+        ["simulate", "timeline", "--file", "x.json", "--no-llm"])
+    assert args.llm is False
