@@ -274,6 +274,53 @@ def _run_benchmark(args, client=None) -> None:
           "-> benchmark_report.json")
 
 
+def _run_simulate(args) -> None:
+    """simulate timeline: clone (default) -> engine walk -> print feed."""
+    import uuid
+
+    from pydantic import ValidationError
+
+    from coe.simulator.engine import walk_timeline
+    from coe.simulator.timeline import TimelineError, load_timeline
+
+    try:
+        tl = load_timeline(args.file)
+    except (TimelineError, ValidationError) as exc:
+        # Deviation vs brief: pydantic schema violations surface as
+        # ValidationError, not TimelineError — both must exit cleanly.
+        raise SystemExit(f"timeline rejected: {exc}")
+    from coe.config import get_settings
+
+    s = get_settings()
+    speed = args.speed or f"{s.simulate_default_speed}"
+    inst_name = args.instance or "factory_demo_01"
+    want_clone = s.simulate_clone if args.on_clone is None else args.on_clone
+    if want_clone:
+        from sqlalchemy.orm import Session
+
+        from coe.db.models.provenance import Instance
+        from coe.db.session import make_engine
+        from coe.services.fork import ForkError, fork_instance
+
+        with Session(make_engine()) as session:
+            source = (session.query(Instance)
+                      .filter(Instance.name == inst_name).one())
+            try:
+                forked = fork_instance(
+                    session, source,
+                    new_name=f"sim-{tl.name}@{uuid.uuid4().hex[:8]}")
+            except ForkError as exc:
+                # Deviation vs brief: fork collision also exits as
+                # SystemExit(str), never a traceback.
+                raise SystemExit(f"fork failed: {exc}")
+            session.commit()
+            inst_name = forked.name
+    print(f"simulating '{tl.name}' on {inst_name} at {speed}")
+    for chunk in walk_timeline(tl, instance_name=inst_name, speed=speed,
+                               start_index=args.from_index):
+        print(f"[{chunk.get('t', '—'):>4}] {chunk}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coe", description="COE factory recovery system")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -359,6 +406,17 @@ def build_parser() -> argparse.ArgumentParser:
     bf = bm_sub.add_parser("fidelity")
     bf.add_argument("--corpus", required=True)
     bf.add_argument("--seed", type=int, default=None)
+
+    sim = sub.add_parser("simulate",
+                         help="replay a scripted disruption day")
+    sim_sub = sim.add_subparsers(dest="simulate_cmd", required=True)
+    st_ = sim_sub.add_parser("timeline")
+    st_.add_argument("--file", required=True)
+    st_.add_argument("--speed", default=None)
+    st_.add_argument("--from", dest="from_index", type=int, default=0)
+    st_.add_argument("--instance", default=None)
+    st_.add_argument("--on-clone", dest="on_clone", action="store_true",
+                     default=None)
 
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
@@ -505,6 +563,9 @@ def main(argv=None) -> None:
     elif args.group == "benchmark":
         if args.benchmark_cmd == "fidelity":
             _run_benchmark(args)
+
+    elif args.group == "simulate":
+        _run_simulate(args)
 
     elif args.group == "mqtt":
         if args.mqtt_cmd == "listen":
