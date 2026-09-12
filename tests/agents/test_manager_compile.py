@@ -108,6 +108,36 @@ def test_valid_candidate_applied_invalid_filtered(world):
     assert len(applied) == 1                  # INVALID never reached applier
 
 
+def test_candidate_target_absent_from_payload_skipped(world):
+    """Persisted-suspension crash guard: a catalog-VALID candidate whose
+    target job is absent from the recovery payload (persisted BLOCKED from
+    a prior run's suspension memory) is skipped with a STRATEGY_SKIPPED
+    warning instead of letting applier's KeyError kill the whole run."""
+    from coe.agents.nodes.manager import run_manager_compile
+    from coe.db.models.fjsp import Job
+    from coe.db.session import session_scope
+
+    with session_scope() as session:
+        ja = (session.query(Job)
+              .filter(Job.instance_id == world, Job.name == "J-A").one())
+        ja.status = "BLOCKED"
+
+    cand = {"type": "DEFER_JOB", "job_id": "J-A", "release_offset": 15}
+    st = _state(
+        strategy_candidates=[{"candidate": cand, "round": 1}],
+        round_verdicts=[
+            {"candidate": cand, "round": 1, "verdict": "VALID",
+             "reason": "ok"}])
+    out = run_manager_compile(st)
+    assert [j["job_id"] for j in out.compiled_payload["jobs"]] == ["J-B"]
+    applied = [w for w in out.compiled_payload["warnings"]
+               if w["type"] == "STRATEGY_APPLIED"]
+    assert applied == []
+    skipped = [w for w in out.compiled_payload["warnings"]
+               if w["type"] == "STRATEGY_SKIPPED"]
+    assert len(skipped) == 1 and skipped[0]["candidate"] == cand
+
+
 def test_weight_derivation_uses_post_preset_beta(world):
     from coe.agents.nodes.manager import run_manager_compile
 

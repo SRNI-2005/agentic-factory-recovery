@@ -75,7 +75,28 @@ def run_manager_compile(state: RecoveryState) -> RecoveryState:
         if latest.get(_canon(c["candidate"]), {}).get("verdict")
         in ("VALID", "VALID_WITH_WARNING")
     ]
-    payload, explicit = apply_candidates(payload, applicable)
+    # Suspension-memory guard: build_payload drops persisted-BLOCKED jobs,
+    # but catalog validation only checks the DB row — a candidate targeting
+    # such a job is VALID at emission time yet useless here. Applier's
+    # contract is "no validation lives here" (its contract-breaking KeyError
+    # would kill the whole run), so crash-unsafe candidates are skipped with
+    # an audit warning instead of applied.
+    payload_job_ids = {j["job_id"] for j in payload["jobs"]}
+    dropped, kept = [], []
+    for cand in applicable:
+        c = cand["candidate"]
+        if c["type"] in ("DEFER_JOB", "SUSPEND_JOB", "TARDINESS_WEIGHT") \
+                and c["job_id"] not in payload_job_ids:
+            dropped.append({"candidate": c, "reason":
+                            "job absent from recovery payload "
+                            "(persisted suspension memory)"})
+        else:
+            kept.append(cand)
+    payload, explicit = apply_candidates(payload, kept)
+    if dropped:
+        payload["warnings"].extend({
+            "type": "STRATEGY_SKIPPED", "candidate": d["candidate"],
+            "reason": d["reason"]} for d in dropped)
 
     derived = derive_tardiness_weights(payload["jobs"],
                                        payload["config"]["beta"]) or {}
