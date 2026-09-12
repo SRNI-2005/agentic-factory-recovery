@@ -105,7 +105,9 @@ def test_replay_idempotent_and_deterministic(tmp_path, demo_scenario):
         {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
          "machine_id": "M3"},
         {"t": 150, "kind": "WORKER", "event_type": "WORKER_ABSENT",
-         "worker_id": "W3", "duration": 60}]))
+         "worker_id": "W3", "duration": 60},
+        {"t": 200, "kind": "MATERIAL", "event_type": "MATERIAL_RESTOCK",
+         "sku": "MAT-001", "quantity": 40}]))
     first = list(walk_timeline(script, instance_name="factory_demo_01",
                                speed="instant"))
     # deterministic message ids: replay everything, count ids
@@ -115,7 +117,7 @@ def test_replay_idempotent_and_deterministic(tmp_path, demo_scenario):
             "JOIN instances i ON i.id=te.instance_id "
             "WHERE i.name='factory_demo_01' AND te.message_id "
             "LIKE 'simul-%'")).all()]
-    assert len(ids) == 2          # one per scripted structured event
+    assert len(ids) == 3          # one per scripted structured event
     second = list(walk_timeline(script, instance_name="factory_demo_01",
                                 speed="instant", start_index=2))
     assert any(c.get("event") == "done" for c in second)
@@ -127,3 +129,43 @@ def test_replay_idempotent_and_deterministic(tmp_path, demo_scenario):
             "WHERE i.name='factory_demo_01' "
             "AND te.message_id LIKE 'simul-%'")).all()]
     assert ids2 == ids                    # no duplicates on replay
+
+
+def test_full_replay_does_not_rematerialize_restock(tmp_path, demo_scenario):
+    """Regression: restock materialization is gated on ingest `created`,
+    so a full replay (start_index=0) leaves the RESTOCK ledger and
+    receipts reservoir byte-for-byte in count unchanged."""
+    from coe.simulator.engine import walk_timeline
+    from sqlalchemy import text
+
+    from coe.db.session import make_engine
+
+    script = str(_timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"},
+        {"t": 150, "kind": "MATERIAL", "event_type": "MATERIAL_RESTOCK",
+         "sku": "MAT-001", "quantity": 40}]))
+    list(walk_timeline(script, instance_name="factory_demo_01",
+                       speed="instant"))
+
+    def _counts():
+        with make_engine().begin() as c:
+            restocks = c.execute(text(
+                "SELECT COUNT(*) FROM material_transactions mt "
+                "JOIN instances i ON i.id=mt.instance_id "
+                "WHERE i.name='factory_demo_01' "
+                "AND mt.transaction_type='RESTOCK'")).scalar()
+            receipts = c.execute(text(
+                "SELECT COUNT(*) FROM material_receipts mr "
+                "JOIN instances i ON i.id=mr.instance_id "
+                "WHERE i.name='factory_demo_01' "
+                "AND mr.source='simulate'")).scalar()
+        return restocks, receipts
+
+    restocks, receipts = _counts()
+    assert (restocks, receipts) == (1, 1)
+    items = list(walk_timeline(script, instance_name="factory_demo_01",
+                               speed="instant", start_index=0))
+    assert [i["created"] for i in items
+            if i.get("event") == "ingest"] == [False, False]
+    assert _counts() == (restocks, receipts)

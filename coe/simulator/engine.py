@@ -10,51 +10,49 @@ from coe.simulator.timeline import (
     load_timeline,
 )
 
-_prev_workers: str | None = None
-
-
 def _scripted_message_id(script_name: str, idx: int) -> str:
     canonical = f"{script_name}|{idx}"
     return "simul-" + hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
 def _walk_paced(speed) -> float | None:
-    """None = instant. N means N schedule-minutes per wall-minute: the
-    inter-event wall pause for a gap of g schedule-minutes is
-    g * 60 / N seconds (bounded to <= 10 s so a sparse script doesn't
-    stall the thread of a CLI run)."""
+    """None = instant; else workers-per-minute pacing knob N (= 60/speed).
+    The actual pause formula lives at the sleep site in walk_timeline."""
     if speed == "instant":
         return None
     return 60.0 / int(speed)
 
 
-def _pin_single_worker() -> None:
+def _pin_single_worker(prior: dict) -> None:
     """P2 §9: determinism consumers pin single-worker search. Settings are
     lru_cached, so force the env and clear the cache BEFORE the first
-    recovery in this process. The prior value is remembered so the walk
-    can restore it afterwards (an engine walk must not reconfigure the
-    host process for everyone else)."""
-    global _prev_workers
-    _prev_workers = os.environ.get("SOLVER_NUM_SEARCH_WORKERS")
+    recovery in this process. The prior value is stored in the per-walk
+    `prior` cell so the walk can restore exactly what IT overwrote
+    afterwards (an engine walk must not reconfigure the host process for
+    everyone else; interleaved/restored walks never clobber each other)."""
+    prior.setdefault("workers", os.environ.get("SOLVER_NUM_SEARCH_WORKERS"))
     os.environ["SOLVER_NUM_SEARCH_WORKERS"] = "1"
     from coe.config import get_settings
 
     get_settings.cache_clear()
 
 
-def _restore_workers() -> None:
-    global _prev_workers
-    if _prev_workers is None:
+def _restore_workers(prior: dict) -> None:
+    prev = prior.get("workers")
+    if prev is None:
         os.environ.pop("SOLVER_NUM_SEARCH_WORKERS", None)
     else:
-        os.environ["SOLVER_NUM_SEARCH_WORKERS"] = _prev_workers
-    _prev_workers = None
+        os.environ["SOLVER_NUM_SEARCH_WORKERS"] = prev
     from coe.config import get_settings
 
     get_settings.cache_clear()
 
 
 def _record_to_wire(ev, *, instance_name: str, message_id: str) -> dict:
+    # Hard-coded "MEDIUM" is cosmetic for the simulator: structured
+    # (non-narrative) timeline events carry no severity of their own, and
+    # ingest treats it as telemetry metadata only. NarrativeEvent.severity
+    # stays bound to the graph path, not telemetry.
     payload = {"message_id": message_id, "instance_id": instance_name,
                "event_type": ev.event_type, "occurred_at": ev.t,
                "severity": "MEDIUM", "reason": "simulated-day"}
@@ -117,20 +115,22 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
     pace = _walk_paced(speed)
 
     committed = []
-    pinned = False
+    prior: dict = {}   # per-walk cell: env values THIS walk overwrote
     try:
         for idx, ev in enumerate(timeline.events):
             if idx < start_index:
                 continue
             if pace is not None and idx > start_index:
+                # Inter-event wall pause = gap * (60 / workers_per_minute);
+                # i.e. pacing N = N schedule-minutes per wall-minute, capped
+                # at 10 s so a sparse script never stalls a CLI thread.
                 gap = ev.t - timeline.events[idx - 1].t
                 time.sleep(min(gap * pace, 10.0))
             if isinstance(ev, NarrativeEvent):
                 from coe.agents.graph import execute_recovery
 
-                if not pinned:
-                    _pin_single_worker()
-                    pinned = True
+                if not prior:
+                    _pin_single_worker(prior)
                 client = llm_client_factory() if llm_client_factory else None
                 result = execute_recovery(
                     instance_name, trigger="CLI", narrative=ev.text,
@@ -146,7 +146,7 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                     _record_to_wire(ev, instance_name=instance_name,
                                     message_id=_scripted_message_id(
                                         timeline.name, idx)))
-                if (isinstance(ev, MaterialEvent)
+                if (created and isinstance(ev, MaterialEvent)
                         and ev.event_type == "MATERIAL_RESTOCK"
                         and ev.quantity is not None):
                     _materialize_restock(instance_name, ev)
@@ -155,5 +155,5 @@ def walk_timeline(timeline: Timeline | str, *, instance_name: str,
                        "telemetry_id": telemetry_id}
         yield {"event": "done", "committed": committed}
     finally:
-        if pinned:
-            _restore_workers()
+        if prior:
+            _restore_workers(prior)
