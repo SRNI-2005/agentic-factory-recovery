@@ -136,6 +136,7 @@ def render() -> None:
         ("sim_last_idx", 0), ("sim_paused", False),
         ("sim_running", False), ("sim_clock", 0), ("sim_total", 0),
         ("sim_active_instance", None), ("sim_before_entries", None),
+        ("sim_feed", []),
     ):
         st.session_state.setdefault(key, default)
 
@@ -170,9 +171,17 @@ def render() -> None:
     if speed is None:
         speed = st.sidebar.selectbox("Speed", ["instant", 10, 30, 60],
                                      index=2)
-    if speed != "instant" and int(speed) <= 0:
-        st.error(f"invalid speed: {speed} (instant or a positive integer)")
-        st.stop()
+    if speed != "instant":
+        try:
+            speed_val = int(speed)
+        except (TypeError, ValueError):
+            st.error(f"invalid speed: {speed} "
+                     "(instant or a positive integer)")
+            st.stop()
+        if speed_val <= 0:
+            st.error(f"invalid speed: {speed} "
+                     "(instant or a positive integer)")
+            st.stop()
 
     st.session_state["sim_total"] = len(tl.events)
     total = len(tl.events)
@@ -197,7 +206,11 @@ def render() -> None:
         run_pressed = True
         pause_pressed = False
 
-    start_run = (run_pressed and not st.session_state["sim_paused"])
+    # Clear the pause BEFORE computing start_run: otherwise a paused run
+    # can never resume (start_run was gated on sim_paused staying True).
+    if run_pressed:
+        st.session_state["sim_paused"] = False
+    start_run = run_pressed
     if start_run:
         active_prev = st.session_state["sim_active_instance"]
         if finished or active_prev is None:
@@ -213,7 +226,6 @@ def render() -> None:
             st.session_state["sim_before_entries"] = \
                 _fetch_active_entries(active)
         st.session_state["sim_running"] = True
-        st.session_state["sim_paused"] = False
 
     _render_idle(tl)
     _render_day()
@@ -229,56 +241,59 @@ def render() -> None:
     before_entries = st.session_state["sim_before_entries"]
 
     terminal = None
-    status = st.status("Simulating day…", expanded=True)
-    feed_area = st.empty()
+    # Cockpit-style context manager so the live feed renders inside the
+    # status container; the exception-guard shim stays for bare-mode.
+    with st.status("Simulating day…", expanded=True) as status:
+        feed_area = st.empty()
 
-    def _flush() -> None:
-        feed_area.markdown("\n".join(st.session_state["sim_feed"]))
+        def _flush() -> None:
+            feed_area.markdown("\n".join(st.session_state["sim_feed"]))
 
-    if speed == "instant":
-        # Instant walks complete synchronously in ONE render pass —
-        # safe inside a st.status block (no threading; RunManager lesson).
-        for chunk in walk_timeline(
-            tl, instance_name=active, speed="instant",
-            start_index=st.session_state["sim_last_idx"],
-        ):
-            if chunk["event"] == "done":
-                terminal = chunk
-                break
-            st.session_state["sim_last_idx"] = chunk["idx"] + 1
-            st.session_state["sim_clock"] = chunk["t"]
-            st.session_state["sim_feed"].append(
-                f"[t={chunk['t']:>4}] {chunk['event']} {chunk['kind']}")
-            _flush()
-    else:
-        # Paced mode: ONE event per rerender. A fresh generator is
-        # created on every button-driven rerender; the engine skips
-        # idx < start_index (already persisted) and runs silently
-        # instant — the page owns the pacing clock via the pause
-        # toggle + Run/Resume buttons.
-        gen = walk_timeline(tl, instance_name=active, speed="instant",
-                            start_index=st.session_state["sim_last_idx"])
-        chunk = next(gen, None)
-        gen.close()
-        if chunk is not None:
-            if chunk["event"] == "done":
-                terminal = chunk
-            else:
+        if speed == "instant":
+            # Instant walks complete synchronously in ONE render pass —
+            # safe inside a st.status block (no threading; RunManager lesson).
+            for chunk in walk_timeline(
+                tl, instance_name=active, speed="instant",
+                start_index=st.session_state["sim_last_idx"],
+            ):
+                if chunk["event"] == "done":
+                    terminal = chunk
+                    break
                 st.session_state["sim_last_idx"] = chunk["idx"] + 1
                 st.session_state["sim_clock"] = chunk["t"]
                 st.session_state["sim_feed"].append(
-                    f"[t={chunk['t']:>4}] {chunk['event']} "
-                    f"{chunk['kind']}")
+                    f"[t={chunk['t']:>4}] {chunk['event']} {chunk['kind']}")
                 _flush()
+        else:
+            # Paced mode: ONE event per rerender. A fresh generator is
+            # created on every button-driven rerender; the engine skips
+            # idx < start_index (already persisted) and runs silently
+            # instant — the page owns the pacing clock via the pause
+            # toggle + Run/Resume buttons.
+            gen = walk_timeline(tl, instance_name=active, speed="instant",
+                                start_index=st.session_state["sim_last_idx"])
+            chunk = next(gen, None)
+            gen.close()
+            if chunk is not None:
+                if chunk["event"] == "done":
+                    terminal = chunk
+                else:
+                    st.session_state["sim_last_idx"] = chunk["idx"] + 1
+                    st.session_state["sim_clock"] = chunk["t"]
+                    st.session_state["sim_feed"].append(
+                        f"[t={chunk['t']:>4}] {chunk['event']} "
+                        f"{chunk['kind']}")
+                    _flush()
 
-    try:
-        status.update(
-            label="Day complete" if terminal is not None else "Simulating…",
-            state="complete" if terminal is not None else "running",
-        )
-    except StreamlitAPIException:
-        # bare Streamlit (tests): status containers have no update()
-        pass
+        try:
+            status.update(
+                label="Day complete" if terminal is not None else "Simulating…",
+                state="complete" if terminal is not None else "running",
+            )
+        except (StreamlitAPIException, AttributeError):
+            # bare Streamlit (tests): status containers have no update()
+            # (bare-mode StatusContainer.__enter__ may return None)
+            pass
 
     if terminal is not None:
         st.session_state["sim_running"] = False
