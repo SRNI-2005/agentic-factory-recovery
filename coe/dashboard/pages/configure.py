@@ -217,7 +217,7 @@ def _render_gantt(entries):
         customdata = [
             (int(r["start"]) + int(r["dur"]),
              r["Worker"],
-             seq,
+             task,
              _skus_for(job_name, seq))
             for r in grp.to_dict("records")
         ]
@@ -234,7 +234,7 @@ def _render_gantt(entries):
             hovertemplate=(
                 "%{y}<br>%{text}<br>"
                 "Start: %{base} min · End: %{customdata[0]} min<br>"
-                "Worker: %{customdata[1]} · Op #: %{customdata[2]}<br>"
+                "Operation: %{customdata[2]} · Worker: %{customdata[1]}<br>"
                 "Materials: %{customdata[3]}<extra></extra>"
             ),
         ))
