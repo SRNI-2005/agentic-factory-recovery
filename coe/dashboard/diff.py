@@ -109,7 +109,7 @@ def _build_figure(rows: list[dict], *, title: str = ""):
     fig.update_layout(
         barmode="overlay",
         title=title or "Schedule diff",
-        xaxis_title="Time (hh:mm of the simulated day)",
+        xaxis_title="Time (minutes)",
         yaxis_title="Machine",
         showlegend=False,
     )

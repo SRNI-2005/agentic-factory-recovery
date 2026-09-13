@@ -190,15 +190,20 @@ def _render_gantt(entries):
                 Machine=machine,
                 Task=label,
                 Worker=worker,
-                Start=pd.Timestamp("2024-01-01") + pd.Timedelta(minutes=start),
-                Finish=pd.Timestamp("2024-01-01") + pd.Timedelta(minutes=end),
+                start=start,
+                dur=max(1, end - start),
             )
         )
     df = pd.DataFrame(rows)
     fig = px.timeline(
-        df, x_start="Start", x_end="Finish", y="Machine",
+        df, x_start="start", x_end="dur", y="Machine",
         color="Task", hover_data=["Worker"],
     )
+    # Numeric minute axis (repo-wide time convention): px.timeline still
+    # emits a numeric axis, but make the visible span explicit.
+    span = max((r["start"] + r["dur"] for r in rows), default=60)
+    fig.update_xaxes(range=[0, span], tick0=0, dtick=60)
+    fig.update_xaxes(title_text="Time (minutes)")
     fig.update_yaxes(autorange="reversed")
     fig.update_layout(height=max(300, len(set(r["Machine"] for r in rows)) * 50 + 100))
     import streamlit as st
