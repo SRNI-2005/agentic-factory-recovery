@@ -95,10 +95,21 @@ def _build_figure(rows: list[dict], *, title: str = ""):
             ))
 
     fig.update_yaxes(autorange="reversed")
+
+    # Datetime-style ticks (00:00, 01:00, ...) over the MINUTE axis —
+    # visual parity with the Configure page's timeline Gantt.
+    span = max((int((r["Finish"] - TS0).total_seconds() // 60)
+                for r in rows), default=0) + 60
+    ticks = list(range(0, span + 1, 60))
+    fig.update_xaxes(
+        tickvals=ticks,
+        ticktext=[f"{v // 60:02d}:{v % 60:02d}" for v in ticks],
+        range=[0, span],
+    )
     fig.update_layout(
         barmode="overlay",
         title=title or "Schedule diff",
-        xaxis_title="Time (minutes)",
+        xaxis_title="Time (hh:mm of the simulated day)",
         yaxis_title="Machine",
         showlegend=False,
     )
