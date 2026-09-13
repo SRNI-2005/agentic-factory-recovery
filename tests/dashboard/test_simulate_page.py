@@ -91,6 +91,9 @@ def _make_st():
     st.markdown = MagicMock()
     st.plotly_chart = MagicMock()
     st.stop = MagicMock(side_effect=SystemExit)
+    # paced auto-advance: real streamlit raises RerunException (the
+    # framework rerenders); the stub just records the call.
+    st.rerun = MagicMock()
     col_run = MagicMock()
     col_pause = MagicMock()
     st.sidebar = types.SimpleNamespace(
@@ -135,6 +138,7 @@ def test_invalid_speed_guards_non_numeric(clean_db, tmp_path):
 
 def test_paced_run_pause_resume_terminal(
     clean_db, demo_scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
     script_path = _two_event_script(tmp_path)
 
     # Fork disabled for this test; keep every other setting real because
@@ -249,6 +253,45 @@ def test_paced_run_pause_resume_terminal(
             "JOIN instances i ON i.id = te.instance_id "
             "WHERE i.name = 'factory_demo_01'")).one()
     assert n_rows == 2  # exactly one ingest per timeline event
+
+
+def test_paced_no_duplicate_lines_across_rerenders(
+        clean_db, demo_scenario, tmp_path, monkeypatch):
+    """Bug 2026-09-13: walked repeatedly over the same ⏳ event produced
+    duplicate feed lines; the seen-guard must kill duplicates when the
+    page rerenders repeatedly."""
+    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+    script_path = _two_event_script(tmp_path)
+
+    from coe.config import get_settings as real_get_settings
+
+    class _Settings(types.SimpleNamespace):
+        simulate_clone = False
+
+        def __getattr__(self, name):
+            return getattr(real_get_settings(), name)
+
+    monkeypatch.setattr(
+        "coe.config.get_settings", lambda: _Settings())
+
+    st = _make_st()
+    from coe.dashboard.pages import simulate
+
+    st.__path__ = []
+    errors_mod = types.ModuleType("streamlit.errors")
+    errors_mod.StreamlitAPIException = type("StreamlitAPIException",
+                                            (Exception,), {})
+    monkeypatch.setitem(sys.modules, "streamlit.errors", errors_mod)
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+
+    st.session_state["instance"] = "factory_demo_01"
+    st.session_state["sim_mode"] = "scripted"
+    st.session_state["sim_script"] = script_path
+    st.session_state["sim_speed"] = 30
+    for _ in range(3):             # emulate repeated browser rerenders
+        simulate.render()
+    lines = [ln for ln in st.session_state["sim_feed"] if ln.strip()]
+    assert len(lines) == len(set(lines)), "duplicate feed lines remain"
 
 
 # ---------------------------------------------------------------------------

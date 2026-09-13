@@ -135,9 +135,14 @@ def _render_day() -> None:
 
     total = max(st.session_state.get("sim_total", 1), 1)
     st.progress(min(st.session_state["sim_last_idx"] / total, 1.0))
-    if st.session_state.get("sim_feed"):
-        with st.status("Event feed", expanded=True):
-            st.markdown("\n\n".join(st.session_state["sim_feed"]))
+
+
+def _walk_paced_seconds(speed) -> float:
+    """Dwell between paced rerenders (N× speed: the page owns pacing)."""
+    try:
+        return 60.0 / int(speed)
+    except (TypeError, ValueError):
+        return 2.0
 
 
 def _feed_line(chunk: dict) -> str:
@@ -437,6 +442,7 @@ def render() -> None:
             st.session_state["sim_last_idx"] = 0
             st.session_state["sim_clock"] = 0
             st.session_state["sim_feed"] = []
+            st.session_state["sim_seen"] = set()   # a second day repaints
             st.session_state["sim_before_entries"] = \
                 _fetch_active_entries(active)
         st.session_state["sim_running"] = True
@@ -477,6 +483,10 @@ def render() -> None:
                 if chunk["event"] == "recovery_start":
                     # Do NOT advance sim_last_idx — the completion chunk
                     # advances it. Surface that this step is live.
+                    key = (chunk.get("t"), chunk.get("event"))
+                    if key in st.session_state["sim_seen"]:
+                        continue
+                    st.session_state["sim_seen"].add(key)
                     st.session_state["sim_feed"].append(
                         f"[t={chunk['t']:>4}] ⏳ recovery starting "
                         f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
@@ -485,53 +495,12 @@ def render() -> None:
                     continue
                 st.session_state["sim_last_idx"] = chunk["idx"] + 1
                 st.session_state["sim_clock"] = chunk["t"]
-                if chunk["event"] == "recovery":
-                    status = chunk.get("status", "?")
-                    mark = "✓" if status == "COMMITTED" else f"✗ {status}"
-                    st.session_state["sim_feed"].append(
-                        f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
-                        f"{mark}")
-                else:
-                    st.session_state["sim_feed"].append(
-                        f"[t={chunk['t']:>4}] {chunk['event']} "
-                        f"{chunk.get('kind', '')}".rstrip())
-                _flush()
-        else:
-            # Paced mode: ONE event per rerender. A fresh generator is
-            # created on every button-driven rerender; the engine skips
-            # idx < start_index (already persisted) and runs silently
-            # instant — the page owns the pacing clock via the pause
-            # toggle + Run/Resume buttons.
-            gen = walk_timeline(tl, instance_name=active, speed="instant",
-                                llm_client_factory=llm_client_factory,
-                                start_index=st.session_state["sim_last_idx"])
-            # One TERMINAL-BAR step per click: recovery_start chunks are
-            # consumed inline (displayed) until the step's completion chunk
-            # arrives — the generator is only ever closed at a yield
-            # boundary, never mid-recovery.
-            chunk = None
-            while True:
-                chunk = next(gen, None)
-                if chunk is None or chunk["event"] == "recovery_start":
-                    if chunk is not None:
-                        st.session_state["sim_feed"].append(
-                            f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                            f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
-                            " this takes minutes…")
-                        _flush()
-                    continue
-                break
-            gen.close()
-            if chunk is not None:
-                if chunk["event"] == "done":
-                    terminal = chunk
-                else:
-                    st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                    st.session_state["sim_clock"] = chunk["t"]
+                key = (chunk.get("t"), chunk.get("event"))
+                if key not in st.session_state["sim_seen"]:
+                    st.session_state["sim_seen"].add(key)
                     if chunk["event"] == "recovery":
                         status = chunk.get("status", "?")
-                        mark = ("✓" if status == "COMMITTED"
-                                else f"✗ {status}")
+                        mark = "✓" if status == "COMMITTED" else f"✗ {status}"
                         st.session_state["sim_feed"].append(
                             f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
                             f"{mark}")
@@ -540,6 +509,73 @@ def render() -> None:
                             f"[t={chunk['t']:>4}] {chunk['event']} "
                             f"{chunk.get('kind', '')}".rstrip())
                     _flush()
+        else:
+            # Paced mode: ONE full terminator per auto-rerender,
+            # st.rerun() self-advancement. A fresh generator is created
+            # on every rerender; the engine skips idx < start_index
+            # (already persisted) and runs silently instant — the page
+            # owns the pacing clock via the pause toggle + Run/Resume
+            # buttons. recovery_start / auto_recover chunks NEVER
+            # advance sim_last_idx and never break the loop — the walk
+            # is driven to the next terminator (ingest chunk or
+            # recovery completion) INSIDE this rerender so a narrative
+            # solve finishes inline; the generator is only ever closed
+            # at a yield boundary, never mid-recovery.
+            gen = walk_timeline(tl, instance_name=active, speed="instant",
+                                llm_client_factory=llm_client_factory,
+                                start_index=st.session_state["sim_last_idx"])
+            try:
+                while True:
+                    chunk = next(gen, None)
+                    if chunk is None:
+                        terminal = {"event": "done", "committed": []}
+                        break
+                    if chunk["event"] == "done":
+                        terminal = chunk
+                        break
+                    key = (chunk.get("t"), chunk.get("event"))
+                    if key in st.session_state["sim_seen"]:
+                        if chunk["event"] in ("ingest", "recovery"):
+                            break
+                        continue
+                    st.session_state["sim_seen"].add(key)
+                    if chunk["event"] == "recovery":
+                        status = chunk.get("status", "?")
+                        mark = ("✓ COMMITTED" if status == "COMMITTED"
+                                else f"✗ {status}")
+                        line = (f"[t={chunk['t']:>4}] recovery "
+                                f"{chunk.get('kind', '')} — {mark}")
+                        st.session_state["sim_last_idx"] = chunk["idx"] + 1
+                    elif chunk["event"] == "recovery_start":
+                        who = ("live LLM" if chunk.get("live")
+                               else "auto-fix (no LLM)")
+                        line = (f"[t={chunk['t']:>4}] ⏳ recovery starting "
+                                f"({who}) — solving…")
+                    elif chunk["event"] == "auto_recover":
+                        line = f"[t={chunk['t']:>4}] auto_recover"
+                    else:
+                        line = (f"[t={chunk['t']:>4}] {chunk['event']} "
+                                f"{chunk.get('kind', '')}".rstrip())
+                        st.session_state["sim_last_idx"] = chunk["idx"] + 1
+                        st.session_state["sim_clock"] = chunk["t"]
+                    st.session_state["sim_feed"].append(line)
+                    _flush()
+                    if chunk["event"] not in ("recovery_start",
+                                              "auto_recover"):
+                        break         # terminator → return control
+            finally:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+            # auto-advance: one dwell, then a fresh rerender drives the
+            # next slice (Bug 1 dies — no single green button press
+            # needed per event).
+            if terminal is None and not st.session_state.get("sim_paused"):
+                import time
+
+                time.sleep(min(_walk_paced_seconds(speed), 2.0))
+                st.rerun()
 
         try:
             status.update(
