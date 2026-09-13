@@ -3,8 +3,17 @@
 ``schedule_frames`` takes two entry lists (the schedule before a recovery
 run and the newly active schedule) and returns a sequence of Plotly
 Gantt figures that visualise the transition step by step.
+
+X-axis is absolute minutes since day-zero (numeric, no timestamp games —
+bars anchor at their start minute and span their duration; defect fix
+2026-09-13: the old chart mixed a timestamp base with an hours-divided
+duration, squeezing the whole day onto a 0..7 axis).
 """
 from __future__ import annotations
+
+import pandas as pd
+
+TS0 = pd.Timestamp("2024-01-01")   # zero-minute origin used by _to_row
 
 
 def _op_key(entry: dict) -> tuple[str, int]:
@@ -51,9 +60,10 @@ def _build_figure(rows: list[dict], *, title: str = ""):
     if not visible.empty:
         for task, grp in visible.groupby("Task", sort=False):
             fig.add_trace(go.Bar(
-                x=[(r["Finish"] - r["Start"]).total_seconds() / 60
-                   for _, r in grp.iterrows()],
-                base=[r["Start"] for _, r in grp.iterrows()],
+                x=[int((r["Finish"] - r["Start"]).total_seconds() // 60)
+                   for _, r in grp.iterrows()],   # duration (minutes)
+                base=[int((r["Start"] - TS0).total_seconds() // 60)
+                      for _, r in grp.iterrows()],  # absolute-minute anchor
                 y=[r["Machine"] for _, r in grp.iterrows()],
                 name=task,
                 orientation="h",
@@ -61,16 +71,17 @@ def _build_figure(rows: list[dict], *, title: str = ""):
                 textposition="inside",
                 hovertemplate=(
                     "%{y}<br>%{text}<br>"
-                    "Start: %{base}<br>Duration: %{x} min<extra></extra>"
+                    "Start: %{base} min<br>Duration: %{x} min<extra></extra>"
                 ),
             ))
 
     if not ghosts.empty:
         for task, grp in ghosts.groupby("Task", sort=False):
             fig.add_trace(go.Bar(
-                x=[(r["Finish"] - r["Start"]).total_seconds() / 60
-                   for _, r in grp.iterrows()],
-                base=[r["Start"] for _, r in grp.iterrows()],
+                x=[int((r["Finish"] - r["Start"]).total_seconds() // 60)
+                   for _, r in grp.iterrows()],           # ghost duration
+                base=[int((r["Start"] - TS0).total_seconds() // 60)
+                      for _, r in grp.iterrows()],        # ghost anchor
                 y=[r["Machine"] for _, r in grp.iterrows()],
                 name=task + " (removed)",
                 orientation="h",
@@ -79,7 +90,7 @@ def _build_figure(rows: list[dict], *, title: str = ""):
                 textposition="inside",
                 hovertemplate=(
                     "%{y}<br>%{text}<br>"
-                    "Start: %{base}<br>Duration: %{x} min<extra></extra>"
+                    "Start: %{base} min<br>Duration: %{x} min<extra></extra>"
                 ),
             ))
 
@@ -87,7 +98,7 @@ def _build_figure(rows: list[dict], *, title: str = ""):
     fig.update_layout(
         barmode="overlay",
         title=title or "Schedule diff",
-        xaxis_title="Time",
+        xaxis_title="Time (minutes)",
         yaxis_title="Machine",
         showlegend=False,
     )

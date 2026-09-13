@@ -131,7 +131,7 @@ def _render_day() -> None:
     st.progress(min(st.session_state["sim_last_idx"] / total, 1.0))
     if st.session_state.get("sim_feed"):
         with st.status("Event feed", expanded=True):
-            st.markdown("\n".join(st.session_state["sim_feed"]))
+            st.markdown("\n\n".join(st.session_state["sim_feed"]))
 
 
 def render() -> None:
@@ -302,7 +302,7 @@ def render() -> None:
         feed_area = st.empty()
 
         def _flush() -> None:
-            feed_area.markdown("\n".join(st.session_state["sim_feed"]))
+            feed_area.markdown("\n\n".join(st.session_state["sim_feed"]))
 
         if speed == "instant":
             # Instant walks complete synchronously in ONE render pass —
