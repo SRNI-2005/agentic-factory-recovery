@@ -9,15 +9,6 @@ def _no_factory():
     return None
 
 
-def _chunks(instance, queue=None):
-    from coe.simulator.live import live_day
-
-    items = list(live_day(instance, speed="instant",
-                          llm_client_factory=_no_factory,
-                          interrupt_queue=queue))
-    return items
-
-
 def test_live_day_walks_completions_no_interruptions(sim_factory_instance):
     """Spec AC 1: zero queued disruptions -> zero solves, honest ticks."""
     from coe.simulator.live import live_day

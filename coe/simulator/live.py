@@ -1,4 +1,3 @@
-# coe/simulator/live.py
 """Live-day walker (spec 2026-09-13 §1-§5).
 
 The committed schedule is played forward: t advances over completion
@@ -35,7 +34,13 @@ class InterruptQueue:
 def _dwell_pause(speed) -> float | None:
     if speed == "instant":
         return None
-    return 60.0 / int(speed)
+    try:
+        n = int(speed)
+    except (TypeError, ValueError):
+        raise LiveDayError(f"invalid speed: {speed!r}")
+    if n <= 0:
+        raise LiveDayError(f"invalid speed: {speed!r}")
+    return 60.0 / n
 
 
 def _pin_single_worker(prior: dict) -> None:
@@ -101,9 +106,10 @@ def live_day(instance_name: str, *, speed: int | str = "instant",
     pace = _dwell_pause(speed)
     prior: dict = {}
     t = int(start_clock)
+    engine = make_engine()
     try:
         while True:
-            with Session(make_engine()) as session:
+            with Session(engine) as session:
                 nxt, mk = _board(session, instance_name, t)
             if mk is None:
                 raise LiveDayError(
@@ -136,11 +142,13 @@ def live_day(instance_name: str, *, speed: int | str = "instant",
 
                 time.sleep(min((nxt - t) * pace, 10.0))
             t = nxt
-            with Session(make_engine()) as session:
+            with Session(engine) as session:
                 ds = project_day(session, instance_name=instance_name, t=t)
             yield {"event": "tick", "t": t,
                    "completed": len(ds.completed_ops),
                    "in_progress": len(ds.in_progress),
                    "stock": dict(ds.effective_stock)}
     finally:
-        _restore_workers(prior)
+        if prior:
+            _restore_workers(prior)
+        engine.dispose()
