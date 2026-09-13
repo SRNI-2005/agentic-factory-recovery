@@ -1,4 +1,10 @@
-"""Simulate page — scripted-day playback with pacing controls."""
+"""Simulate page — live-day + scripted-day playback with pacing controls.
+
+Test seam: a *staged* chat submission may be injected via
+``st.session_state["sim_chat_text"]`` before ``render()``; the production
+path is the ``st.chat_input`` on the page itself (§6). Staged text is
+consumed once into the InterruptQueue, exactly as typed input would be.
+"""
 from __future__ import annotations
 
 
@@ -134,6 +140,122 @@ def _render_day() -> None:
             st.markdown("\n\n".join(st.session_state["sim_feed"]))
 
 
+def _feed_line(chunk: dict) -> str:
+    ev = chunk.get("event", "?")
+    t = chunk.get("t", "—")
+    if ev == "tick":
+        return (f"[t={t:>4}] tick — done={chunk.get('completed', '?')} "
+                f"running={chunk.get('in_progress', '?')}")
+    if ev == "recovery_start":
+        who = "live LLM" if chunk.get("live") else "auto-fix (no LLM)"
+        return f"[t={t:>4}] ⏳ recovery starting ({who}) — solving…"
+    if ev == "recovery":
+        status = chunk.get("status", "?")
+        mark = ("✓ COMMITTED" if status == "COMMITTED" else f"✗ {status}")
+        return f"[t={t:>4}] recovery NARRATIVE — {mark}"
+    if ev == "day_end":
+        return f"[t={t:>4}] day_end"
+    return f"[t={t:>4}] {ev}"
+
+
+def _render_live(instance_name: str, llm_client_factory, speed) -> None:
+    """Live-day controller (spec §6).
+
+    Self-driving: instant = the whole day in ONE render pass; paced =
+    ONE chunk per rerender with ``st.rerun()`` self-advancement
+    (recovery chunks always complete inline — never discarded
+    mid-recovery). The generator itself always runs ``instant``; the
+    page owns the pacing clock (same controller semantics as the
+    scripted paced lane).
+    """
+    import time as _time
+
+    import streamlit as st
+    from streamlit.errors import StreamlitAPIException
+
+    from coe.simulator.live import InterruptQueue, live_day
+
+    st.session_state.setdefault("sim_complete", False)
+
+    # New active instance (or first visit): fresh queue, dedup set, feed.
+    if st.session_state.get("sim_live_instance") != instance_name:
+        st.session_state["sim_live_instance"] = instance_name
+        st.session_state["sim_interrupt_q"] = InterruptQueue()
+        st.session_state["sim_seen"] = set()
+        st.session_state["sim_feed"] = []
+        st.session_state["sim_clock"] = 0
+        st.session_state["sim_complete"] = False
+        try:
+            active = _fork_or_default(instance_name, "live")
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
+        st.session_state["sim_active_instance"] = active
+    active = st.session_state["sim_active_instance"]
+
+    if st.session_state["sim_complete"]:
+        st.caption("Day complete. Select a new instance to replay.")
+        return
+
+    st.session_state["sim_running"] = True
+
+    # §6: the chat input renders ONLY while the walk is live. A typed
+    # submission is queued and the walk reruns; the staged key is the
+    # test seam (see module docstring).
+    staged = st.session_state.pop("sim_chat_text", None)
+    chat = st.chat_input("Describe a disruption to inject mid-flight…",
+                         key="sim_live_chat")
+    narrative = staged or (chat or None)
+    if narrative:
+        st.session_state["sim_interrupt_q"].push(narrative)
+
+    with st.status("Simulating day…", expanded=True) as status:
+        feed_area = st.empty()
+
+        def _flush() -> None:
+            feed_area.markdown("\n\n".join(st.session_state["sim_feed"]))
+
+        def _record(chunk: dict) -> None:
+            key = (chunk.get("t"), chunk.get("event"))
+            if key in st.session_state["sim_seen"]:
+                return
+            st.session_state["sim_seen"].add(key)
+            st.session_state["sim_feed"].append(_feed_line(chunk))
+            st.session_state["sim_clock"] = chunk["t"]
+            _flush()
+
+        terminal = False
+        rerender = False
+        gen = live_day(active, speed="instant",
+                       llm_client_factory=llm_client_factory,
+                       start_clock=st.session_state["sim_clock"],
+                       interrupt_queue=st.session_state["sim_interrupt_q"])
+        chunk = next(gen, None)
+        while chunk is not None:
+            _record(chunk)
+            if chunk["event"] == "day_end":
+                terminal = True
+                break
+            if speed != "instant" and chunk["event"] != "recovery_start":
+                # one dwell per rerender; recovery completes inline
+                rerender = True
+                break
+            chunk = next(gen, None)
+        try:
+            status.update(
+                label="Day complete" if terminal else "Simulating…",
+                state="complete" if terminal else "running")
+        except (StreamlitAPIException, AttributeError):
+            pass
+
+    if terminal:
+        st.session_state["sim_running"] = False
+        st.session_state["sim_complete"] = True
+    elif rerender:
+        _time.sleep(min(60.0 / max(int(speed), 1), 10.0))
+        st.rerun()
+
+
 def render() -> None:
     import pathlib
 
@@ -154,8 +276,53 @@ def render() -> None:
         ("sim_running", False), ("sim_clock", 0), ("sim_total", 0),
         ("sim_active_instance", None), ("sim_before_entries", None),
         ("sim_feed", []),
+        ("sim_mode", "live"), ("sim_interrupt_q", None),
+        ("sim_seen", set()),
     ):
         st.session_state.setdefault(key, default)
+
+    # --- mode picker (before the timeline pickers; spec §6) ---------------
+    # No widget key: the radio re-seeds from the persisted sim_mode each
+    # render, so a staged sim_mode (test seam) and the user's last pick
+    # both survive rerenders.
+    mode = st.sidebar.radio(
+        "Mode", ["Live day", "Scripted replay"],
+        index=0 if st.session_state.get("sim_mode", "live") == "live"
+        else 1, horizontal=True)
+    st.session_state["sim_mode"] = ("live" if mode == "Live day"
+                                    else "scripted")
+
+    speed = st.session_state.get("sim_speed")
+    if speed is None:
+        speed = st.sidebar.selectbox("Speed", ["instant", 10, 30, 60],
+                                     index=2)
+    if speed != "instant":
+        try:
+            speed_val = int(speed)
+        except (TypeError, ValueError):
+            st.error(f"invalid speed: {speed} "
+                     "(instant or a positive integer)")
+            st.stop()
+        if speed_val <= 0:
+            st.error(f"invalid speed: {speed} "
+                     "(instant or a positive integer)")
+            st.stop()
+
+    use_llm = st.sidebar.toggle(
+        "LLM narration (AI strategy + explanation)", value=False,
+        help="Off = deterministic auto-fix: translate/strategy/explain "
+             "are answered by the degraded client; the solver alone "
+             "re-plans. On = live provider.")
+    if use_llm:
+        llm_client_factory = None    # None = live provider (§9)
+    else:
+        from coe.agents.degraded_client import DegradedLLMClient
+
+        llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
+
+    if st.session_state["sim_mode"] == "live":
+        _render_live(instance_name, llm_client_factory, speed)
+        return
 
     # --- timeline source ---------------------------------------------------
     manual_entry = "sim_script" in st.session_state
@@ -184,11 +351,6 @@ def render() -> None:
         st.error(f"Timeline '{tl.name}' has no events.")
         st.stop()
 
-    speed = st.session_state.get("sim_speed")
-    if speed is None:
-        speed = st.sidebar.selectbox("Speed", ["instant", 10, 30, 60],
-                                     index=2)
-
     # auto_recover override (spec amendment 2026-09-13): the toggle wins
     # over the timeline field when present; reset when the script changes
     # (same reset-on-script-change pattern as sim_script/sim_speed).
@@ -201,29 +363,6 @@ def render() -> None:
              "full recovery solve. Off = facts only (narrative steps "
              "still trigger solves).")
     st.session_state["sim_auto_recover_script"] = tl.name
-
-    use_llm = st.sidebar.toggle(
-        "LLM narration (AI strategy + explanation)", value=False,
-        help="Off = deterministic auto-fix: translate/strategy/explain "
-             "are answered by the degraded client; the solver alone "
-             "re-plans. On = live provider.")
-    if use_llm:
-        llm_client_factory = None    # None = live provider (§9)
-    else:
-        from coe.agents.degraded_client import DegradedLLMClient
-
-        llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
-    if speed != "instant":
-        try:
-            speed_val = int(speed)
-        except (TypeError, ValueError):
-            st.error(f"invalid speed: {speed} "
-                     "(instant or a positive integer)")
-            st.stop()
-        if speed_val <= 0:
-            st.error(f"invalid speed: {speed} "
-                     "(instant or a positive integer)")
-            st.stop()
 
     st.session_state["sim_total"] = len(tl.events)
     total = len(tl.events)

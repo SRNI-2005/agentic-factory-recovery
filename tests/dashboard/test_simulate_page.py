@@ -50,6 +50,7 @@ def test_page_smoke(clean_db, demo_scenario, tmp_path):
     from coe.dashboard.pages import simulate as sim_page
 
     st.session_state["instance"] = "factory_demo_01"
+    st.session_state["sim_mode"] = "scripted"  # pre-Task-4 scripted lane
     st.session_state["sim_script"] = _tiny_script(tmp_path)
     st.session_state["sim_speed"] = "instant"
     # direct-render convention used by tests/dashboard/test_cockpit_page.py
@@ -97,6 +98,7 @@ def _make_st():
         columns=MagicMock(return_value=[col_run, col_pause]),
         # Simulate page toggle (LLM narration); False = degraded auto-fix.
         toggle=MagicMock(return_value=False),
+        radio=MagicMock(return_value="Scripted replay"),  # pre-Task-4 lane
         _col_run=col_run, _col_pause=col_pause)
     st.status = MagicMock(return_value=MagicMock(
         __enter__=lambda s: s,
@@ -247,3 +249,47 @@ def test_paced_run_pause_resume_terminal(
             "JOIN instances i ON i.id = te.instance_id "
             "WHERE i.name = 'factory_demo_01'")).one()
     assert n_rows == 2  # exactly one ingest per timeline event
+
+
+# ---------------------------------------------------------------------------
+# live-day mode (Task 3): mode picker + controller + chat capture
+# ---------------------------------------------------------------------------
+
+def _baseline_instance() -> str:
+    """Baseline-bearing clone (shared helper, same subprocess pattern)."""
+    from tests.simulator.conftest import ensure_sim_baseline_clone
+
+    return ensure_sim_baseline_clone()
+
+
+def test_live_mode_runs_to_end_instantly(clean_db, demo_scenario):
+    """AC §8.1: live + instant + no interrupts: completes with ZERO
+    solves; no duplicate feed lines (dedup invariant)."""
+    st = _fresh_streamlit()
+
+    from coe.dashboard.pages import simulate
+
+    st.session_state["instance"] = _baseline_instance()
+    st.session_state["sim_mode"] = "live"
+    st.session_state["sim_speed"] = "instant"
+    simulate.render()
+    feed = list(st.session_state["sim_feed"])
+    assert any("day_end" in ln for ln in feed)
+    assert len(feed) == len(set(feed))
+    assert not any("recovery" in ln for ln in feed)
+
+
+def test_live_chat_queues_and_solves(clean_db, demo_scenario):
+    """AC §8.2 at the page level: queued narrative consumed at the
+    current clock; the feed shows recovery → commit."""
+    st = _fresh_streamlit()
+
+    from coe.dashboard.pages import simulate
+
+    st.session_state["instance"] = _baseline_instance()
+    st.session_state["sim_mode"] = "live"
+    st.session_state["sim_speed"] = "instant"
+    st.session_state["sim_chat_text"] = "M3 gearbox seized, sparks everywhere"
+    simulate.render()
+    joined = "\n".join(st.session_state["sim_feed"])
+    assert "recovery" in joined and "COMMITTED" in joined
