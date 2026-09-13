@@ -195,17 +195,36 @@ def _render_gantt(entries):
             )
         )
     df = pd.DataFrame(rows)
-    fig = px.timeline(
-        df, x_start="start", x_end="dur", y="Machine",
-        color="Task", hover_data=["Worker"],
-    )
-    # Numeric minute axis (repo-wide time convention): px.timeline still
-    # emits a numeric axis, but make the visible span explicit.
-    span = max((r["start"] + r["dur"] for r in rows), default=60)
-    fig.update_xaxes(range=[0, span], tick0=0, dtick=60)
-    fig.update_xaxes(title_text="Time (minutes)")
-    fig.update_yaxes(autorange="reversed")
-    fig.update_layout(height=max(300, len(set(r["Machine"] for r in rows)) * 50 + 100))
+
+    # Explicit numeric-minute Gantt (NO px.timeline — its datetime axis
+    # renders integer minutes as epoch dates, which erased the bars).
+    import plotly.graph_objects as go
+
+    machines = list(dict.fromkeys(r["Machine"] for r in rows))
+    color_pool = px.colors.qualitative.Light24
+    color_by_task = {t: color_pool[i % len(color_pool)]
+                     for i, t in enumerate(sorted(df["Task"].unique()))}
+    fig = go.Figure()
+    for task, grp in df.groupby("Task", sort=False):
+        fig.add_trace(go.Bar(
+            x=list(grp["dur"]),
+            base=list(grp["start"]),
+            y=list(grp["Machine"]),
+            name=task,
+            orientation="h",
+            marker_color=color_by_task[task],
+            text=f"{task} ({grp.iloc[0]['Worker']})",
+            textposition="inside",
+            hovertemplate=(
+                "%{y}<br>%{text}<br>"
+                "Start: %{base} min<br>Duration: %{x} min<extra></extra>"
+            ),
+        ))
+    fig.update_xaxes(title_text="Time (minutes)", tick0=0, dtick=60)
+    fig.update_yaxes(autorange="reversed", categoryorder="array",
+                     categoryarray=machines)
+    fig.update_layout(barmode="overlay", showlegend=True,
+                      height=max(300, len(machines) * 50 + 100))
     import streamlit as st
     st.plotly_chart(fig, use_container_width=True)
 
