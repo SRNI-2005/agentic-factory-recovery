@@ -70,12 +70,13 @@ def _build_figure(rows: list[dict], *, title: str = ""):
                 y=[r["Machine"] for _, r in grp.iterrows()],
                 name=task,
                 orientation="h",
-                text=f"{task} ({grp.iloc[0]['Worker']})",
-                textposition="inside",
+                text=task,
+                textposition="none",
                 customdata=customdata,
                 hovertemplate=(
-                    "%{y}<br>%{text}<br>"
-                    "Start: %{base} min · End: %{customdata[0]} min<extra></extra>"
+                    "%{y}<br>Operation: %{text}<br>"
+                    "Start: %{base} min · End: %{customdata[0]} min · "
+                    "Worker: %{customdata[1]}<extra></extra>"
                 ),
             ))
 
@@ -90,8 +91,8 @@ def _build_figure(rows: list[dict], *, title: str = ""):
                 name=task + " (removed)",
                 orientation="h",
                 marker_color="rgba(180,180,180,0.35)",
-                text=f"{task} (removed)",
-                textposition="inside",
+                text=task,
+                textposition="none",
                 hovertemplate=(
                     "%{y}<br>%{text}<br>"
                     "Start: %{base} min<br>Duration: %{x} min<extra></extra>"

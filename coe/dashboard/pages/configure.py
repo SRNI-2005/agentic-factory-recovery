@@ -202,8 +202,9 @@ def _render_gantt(entries):
 
     machines = list(dict.fromkeys(r["Machine"] for r in rows))
     color_pool = px.colors.qualitative.Light24
-    color_by_task = {t: color_pool[i % len(color_pool)]
-                     for i, t in enumerate(sorted(df["Task"].unique()))}
+    color_by_job = {t: color_pool[i % len(color_pool)]
+                    for i, t in enumerate(sorted(df["Task"].str.split("/op").str[0]
+                                                  .unique()))}
     fig = go.Figure()
     def _skus_for(job_name: str, sequence: int) -> str:
         for r in entries:
@@ -227,14 +228,14 @@ def _render_gantt(entries):
             y=list(grp["Machine"]),
             name=task,
             orientation="h",
-            marker_color=color_by_task[task],
-            text=f"{task} ({grp.iloc[0]['Worker']})",
-            textposition="inside",
+            marker_color=color_by_job[task],
+            text=task,
+            textposition="none",
             customdata=customdata,
             hovertemplate=(
-                "%{y}<br>%{text}<br>"
-                "Start: %{base} min · End: %{customdata[0]} min<br>"
-                "Operation: %{customdata[2]} · Worker: %{customdata[1]}<br>"
+                "%{y}<br>Operation: %{text}<br>"
+                "Start: %{base} min · End: %{customdata[0]} min · "
+                "Worker: %{customdata[1]}<br>"
                 "Materials: %{customdata[3]}<extra></extra>"
             ),
         ))
