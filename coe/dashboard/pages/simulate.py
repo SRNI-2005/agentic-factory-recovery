@@ -173,25 +173,29 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     import streamlit as st
     from streamlit.errors import StreamlitAPIException
 
-    from coe.simulator.live import InterruptQueue, live_day
+    from coe.simulator.live import InterruptQueue, LiveDayError, live_day
 
     st.session_state.setdefault("sim_complete", False)
 
-    # New active instance (or first visit): fresh queue, dedup set, feed.
-    if st.session_state.get("sim_live_instance") != instance_name:
+    # Live lane owns sim_live_active/sim_live_clock (private keys) — never
+    # the scripted lane's sim_active_instance/sim_clock. Re-fork only when
+    # the live lane has no active fork or its SOURCE changed; scripted-lane
+    # equality must never drive live-lane state.
+    if (st.session_state.get("sim_live_active") is None
+            or st.session_state.get("sim_live_instance") != instance_name):
         st.session_state["sim_live_instance"] = instance_name
         st.session_state["sim_interrupt_q"] = InterruptQueue()
         st.session_state["sim_seen"] = set()
         st.session_state["sim_feed"] = []
-        st.session_state["sim_clock"] = 0
+        st.session_state["sim_live_clock"] = 0
         st.session_state["sim_complete"] = False
         try:
             active = _fork_or_default(instance_name, "live")
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
-        st.session_state["sim_active_instance"] = active
-    active = st.session_state["sim_active_instance"]
+        st.session_state["sim_live_active"] = active
+    active = st.session_state["sim_live_active"]
 
     if st.session_state["sim_complete"]:
         st.caption("Day complete. Select a new instance to replay.")
@@ -205,9 +209,12 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     staged = st.session_state.pop("sim_chat_text", None)
     chat = st.chat_input("Describe a disruption to inject mid-flight…",
                          key="sim_live_chat")
-    narrative = staged or (chat or None)
-    if narrative:
-        st.session_state["sim_interrupt_q"].push(narrative)
+    # Push BOTH (staged first, then typed) — the queue is a deque with
+    # ordered resolution; never silently drop a typed submission.
+    if staged:
+        st.session_state["sim_interrupt_q"].push(staged)
+    if chat:
+        st.session_state["sim_interrupt_q"].push(chat)
 
     with st.status("Simulating day…", expanded=True) as status:
         feed_area = st.empty()
@@ -221,26 +228,38 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
                 return
             st.session_state["sim_seen"].add(key)
             st.session_state["sim_feed"].append(_feed_line(chunk))
-            st.session_state["sim_clock"] = chunk["t"]
+            st.session_state["sim_live_clock"] = chunk["t"]
             _flush()
 
         terminal = False
         rerender = False
         gen = live_day(active, speed="instant",
                        llm_client_factory=llm_client_factory,
-                       start_clock=st.session_state["sim_clock"],
+                       start_clock=st.session_state["sim_live_clock"],
                        interrupt_queue=st.session_state["sim_interrupt_q"])
-        chunk = next(gen, None)
-        while chunk is not None:
-            _record(chunk)
-            if chunk["event"] == "day_end":
-                terminal = True
-                break
-            if speed != "instant" and chunk["event"] != "recovery_start":
-                # one dwell per rerender; recovery completes inline
-                rerender = True
-                break
+        try:
             chunk = next(gen, None)
+            while chunk is not None:
+                _record(chunk)
+                if chunk["event"] == "day_end":
+                    terminal = True
+                    break
+                if speed != "instant" and chunk["event"] != "recovery_start":
+                    # one dwell per rerender; recovery completes inline
+                    rerender = True
+                    break
+                chunk = next(gen, None)
+        except LiveDayError as exc:
+            st.error(str(exc))
+            st.session_state["sim_running"] = False
+            st.stop()
+        finally:
+            # Deterministic generator close (workers pin restore), like
+            # the scripted lane; a completed/dead generator may raise.
+            try:
+                gen.close()
+            except Exception:
+                pass
         try:
             status.update(
                 label="Day complete" if terminal else "Simulating…",
@@ -278,6 +297,7 @@ def render() -> None:
         ("sim_feed", []),
         ("sim_mode", "live"), ("sim_interrupt_q", None),
         ("sim_seen", set()),
+        ("sim_live_active", None), ("sim_live_clock", 0),
     ):
         st.session_state.setdefault(key, default)
 

@@ -293,3 +293,51 @@ def test_live_chat_queues_and_solves(clean_db, demo_scenario):
     simulate.render()
     joined = "\n".join(st.session_state["sim_feed"])
     assert "recovery" in joined and "COMMITTED" in joined
+
+
+def test_live_lane_state_isolated_from_scripted(clean_db, demo_scenario,
+                                                tmp_path):
+    """Regression (cross-lane state bleed): the live lane must own
+    sim_live_active/sim_live_clock — a scripted run's sim_active_instance
+    must never be played by the live walker, and the scripted keys must
+    survive a live render untouched."""
+    st = _fresh_streamlit()
+
+    from coe.dashboard.pages import simulate
+
+    source = _baseline_instance()
+
+    # 1. Scripted lane runs first: sim_active_instance becomes X.
+    st.session_state["instance"] = source
+    st.session_state["sim_mode"] = "scripted"
+    st.session_state["sim_script"] = _tiny_script(tmp_path)
+    st.session_state["sim_speed"] = "instant"
+    simulate.render()
+    scripted_active = st.session_state["sim_active_instance"]
+    scripted_clock = st.session_state["sim_clock"]
+    assert scripted_active is not None
+
+    # 2. Switch to live: the live lane forks its OWN fresh clone —
+    #    never reuses X, never reads the scripted clock.
+    st.session_state["sim_mode"] = "live"
+    simulate.render()
+    live_active = st.session_state["sim_live_active"]
+    assert live_active is not None
+    assert live_active != scripted_active
+    assert live_active.startswith("sim-live@")
+    # scripted keys untouched by the live lane
+    assert st.session_state["sim_active_instance"] == scripted_active
+    assert st.session_state["sim_clock"] == scripted_clock
+
+    # 3. live → scripted → live: the live lane restores its own fork
+    #    and clock (guard does not re-fork while the source is unchanged).
+    prev_live_active = live_active
+    prev_live_clock = st.session_state["sim_live_clock"]
+    st.session_state["sim_mode"] = "scripted"
+    simulate.render()
+    st.session_state["sim_mode"] = "live"
+    simulate.render()
+    assert st.session_state["sim_live_active"] == prev_live_active
+    assert st.session_state["sim_live_clock"] == prev_live_clock
+    assert st.session_state["sim_live_active"] != \
+        st.session_state["sim_active_instance"]
