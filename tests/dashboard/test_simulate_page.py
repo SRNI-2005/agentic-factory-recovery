@@ -255,24 +255,51 @@ def test_paced_run_pause_resume_terminal(
     assert n_rows == 2  # exactly one ingest per timeline event
 
 
+def _narrative_event_script(tmp_path):
+    """Single NARRATIVE event: the lane class whose recovery_start chunk
+    Bug 2026-09-13 duplicated. auto_recover=False — the narrative solve
+    itself provides the recovery lane (no auto_recover chunks needed)."""
+    p = tmp_path / "tiny3.json"
+    p.write_text(json.dumps({
+        "name": "tiny3", "seed": 1, "horizon_days": 1,
+        "auto_recover": False,
+        "events": [
+            {"t": 100, "kind": "NARRATIVE",
+             "text": "M3 gearbox seized, sparks everywhere",
+             "severity": "HIGH"},
+        ]}))
+    return str(p)
+
+
 def test_paced_no_duplicate_lines_across_rerenders(
-        clean_db, demo_scenario, tmp_path, monkeypatch):
+        clean_db, demo_scenario, tmp_path, monkeypatch, request):
     """Bug 2026-09-13: walked repeatedly over the same ⏳ event produced
     duplicate feed lines; the seen-guard must kill duplicates when the
-    page rerenders repeatedly."""
+    page rerenders repeatedly.
+
+    Models the crash-mid-solve rerender: after the rerender that showed
+    the "⏳ recovery starting" line, sim_last_idx is rewound to the
+    narrative event's idx WITHOUT clearing sim_seen; the next render
+    must not re-append the ⏳ line. NARRATIVE event chosen deliberately —
+    recovery_start chunks never advance sim_last_idx, so a stray
+    rerender genuinely re-enters the narrative step (the vacuous
+    structured-events-only version produced no recovery chunk at all)."""
     monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
-    script_path = _two_event_script(tmp_path)
-
-    from coe.config import get_settings as real_get_settings
-
-    class _Settings(types.SimpleNamespace):
-        simulate_clone = False
-
-        def __getattr__(self, name):
-            return getattr(real_get_settings(), name)
-
-    monkeypatch.setattr(
-        "coe.config.get_settings", lambda: _Settings())
+    instance = _baseline_instance()   # BEFORE the env squeeze below — the
+    # baseline CLI subprocess must solve with the full default budget.
+    # Keep the narrative solve cheap: drop the §10 recovery floor and
+    # shrink the budget — the dedup guard is independent of the status.
+    # Env override (NOT a get_settings lambda swap): the engine's worker
+    # pin/restore calls get_settings.cache_clear(), which requires the
+    # real lru-cached callable.
+    import coe.cli
+    monkeypatch.setattr(coe.cli, "_recovery_floor", lambda s: s)
+    monkeypatch.setenv("SIMULATE_CLONE", "false")
+    monkeypatch.setenv("SOLVER_TIME_LIMIT_SECONDS", "20")
+    from coe.config import get_settings
+    get_settings.cache_clear()
+    request.addfinalizer(get_settings.cache_clear)  # no stale-cached env
+    script_path = _narrative_event_script(tmp_path)
 
     st = _make_st()
     from coe.dashboard.pages import simulate
@@ -284,12 +311,30 @@ def test_paced_no_duplicate_lines_across_rerenders(
     monkeypatch.setitem(sys.modules, "streamlit.errors", errors_mod)
     monkeypatch.setitem(sys.modules, "streamlit", st)
 
-    st.session_state["instance"] = "factory_demo_01"
+    st.session_state["instance"] = instance
     st.session_state["sim_mode"] = "scripted"
     st.session_state["sim_script"] = script_path
     st.session_state["sim_speed"] = 30
-    for _ in range(3):             # emulate repeated browser rerenders
-        simulate.render()
+
+    def _recovery_start_lines():
+        return [ln for ln in st.session_state["sim_feed"]
+                if "recovery starting" in ln]
+
+    # 1. Run → the narrative step is entered inline: the rerender shows
+    #    the ⏳ line, then the terminator (recovery chunk) advances idx.
+    simulate.render()
+    assert st.session_state["sim_last_idx"] == 1
+    assert len(_recovery_start_lines()) == 1
+
+    # 2. Crash-mid-solve replay: rewind to the narrative event's idx
+    #    WITHOUT clearing sim_seen (browser crash lost widget state, the
+    #    Starlette session survived — exact Bug 2026-09-13 signature).
+    st.session_state["sim_last_idx"] = 0
+    simulate.render()
+    assert len(_recovery_start_lines()) == 1, (
+        "duplicate ⏳ recovery-starting lines across the rewound rerender")
+
+    # 3. Global uniqueness still holds (original invariant).
     lines = [ln for ln in st.session_state["sim_feed"] if ln.strip()]
     assert len(lines) == len(set(lines)), "duplicate feed lines remain"
 
