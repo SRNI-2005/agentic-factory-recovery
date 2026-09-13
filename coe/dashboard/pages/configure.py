@@ -228,7 +228,7 @@ def _render_gantt(entries):
             y=list(grp["Machine"]),
             name=task,
             orientation="h",
-            marker_color=color_by_job[task],
+            marker_color=color_by_job[job_name],
             text=task,
             textposition="none",
             customdata=customdata,
