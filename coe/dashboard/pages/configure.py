@@ -233,7 +233,7 @@ def _render_gantt(entries):
             textposition="none",
             customdata=customdata,
             hovertemplate=(
-                "%{y}<br>Operation: %{text}<br>"
+                "%{y}<br>Operation: %{customdata[2]}<br>"
                 "Start: %{base} min · End: %{customdata[0]} min · "
                 "Worker: %{customdata[1]}<br>"
                 "Materials: %{customdata[3]}<extra></extra>"
