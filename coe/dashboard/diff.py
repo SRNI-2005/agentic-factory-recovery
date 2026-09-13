@@ -59,6 +59,9 @@ def _build_figure(rows: list[dict], *, title: str = ""):
 
     if not visible.empty:
         for task, grp in visible.groupby("Task", sort=False):
+            customdata = [
+                (int((r["Finish"] - TS0).total_seconds() // 60), r["Worker"])
+                for _, r in grp.iterrows()]
             fig.add_trace(go.Bar(
                 x=[int((r["Finish"] - r["Start"]).total_seconds() // 60)
                    for _, r in grp.iterrows()],   # duration (minutes)
@@ -69,9 +72,10 @@ def _build_figure(rows: list[dict], *, title: str = ""):
                 orientation="h",
                 text=f"{task} ({grp.iloc[0]['Worker']})",
                 textposition="inside",
+                customdata=customdata,
                 hovertemplate=(
                     "%{y}<br>%{text}<br>"
-                    "Start: %{base} min<br>Duration: %{x} min<extra></extra>"
+                    "Start: %{base} min · End: %{customdata[0]} min<extra></extra>"
                 ),
             ))
 

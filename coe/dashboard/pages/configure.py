@@ -205,7 +205,22 @@ def _render_gantt(entries):
     color_by_task = {t: color_pool[i % len(color_pool)]
                      for i, t in enumerate(sorted(df["Task"].unique()))}
     fig = go.Figure()
+    def _skus_for(job_name: str, sequence: int) -> str:
+        for r in entries:
+            if (r.get("job_name") == job_name
+                    and int(r.get("sequence_number", -1)) == sequence):
+                return r.get("material_skus") or "none demanded"
+        return "—"
     for task, grp in df.groupby("Task", sort=False):
+        job_name, seq_s = task.rsplit("/op", 1)
+        seq = int(seq_s)
+        customdata = [
+            (int(r["start"]) + int(r["dur"]),
+             r["Worker"],
+             seq,
+             _skus_for(job_name, seq))
+            for r in grp.to_dict("records")
+        ]
         fig.add_trace(go.Bar(
             x=list(grp["dur"]),
             base=list(grp["start"]),
@@ -215,9 +230,12 @@ def _render_gantt(entries):
             marker_color=color_by_task[task],
             text=f"{task} ({grp.iloc[0]['Worker']})",
             textposition="inside",
+            customdata=customdata,
             hovertemplate=(
                 "%{y}<br>%{text}<br>"
-                "Start: %{base} min<br>Duration: %{x} min<extra></extra>"
+                "Start: %{base} min · End: %{customdata[0]} min<br>"
+                "Worker: %{customdata[1]} · Op #: %{customdata[2]}<br>"
+                "Materials: %{customdata[3]}<extra></extra>"
             ),
         ))
     fig.update_xaxes(title_text="Time (minutes)", tick0=0, dtick=60)
