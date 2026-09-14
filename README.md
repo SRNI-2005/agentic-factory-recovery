@@ -324,19 +324,25 @@ Also: **Workbook** section for downloading/uploading xlsx workbooks (upload crea
 - Disruption record JSON, per-node wall-clock bar charts
 - Quantum shadow data
 
-#### 4. Simulate — Scripted-Day Playback
+#### 4. Simulate — Live Day & Scripted Replay
 
-Replays an authored disruption timeline (JSON) at accelerated speed:
+Two modes over one controller:
 
-1. Pick a script (`demo_day_01.json` ships with the repo) and a speed (instant / 10× / 30× / 60×)
-2. Watch the big clock, per-event progress, and live decision feed
-3. Pause / Resume / step through events — resume is replay-safe (no duplicate events)
-4. The walk runs on a `sim-<script>@<8hex>` **clone**, so `factory_demo_01` stays pristine
-5. End-of-walk Gantt transition like the Cockpit
+- **Live day (default)**: select the instance (Needs a committed
+  baseline), press Resume once. The day plays itself — the clock advances
+  at the chosen speed (instant / 10× / 30× / 60×), jobs complete per the
+  committed schedule, stock drains on the board. Type a disruption
+  narrative mid-flight: the clock freezes at the current minute, the full
+  recovery re-plans (DegradedLLMClient unless the LLM toggle is on), and
+  the new board resumes from that exact minute. Pause freezes; a solve
+  in flight completes before Pause takes effect.
+- **Scripted replay**: an authored JSON timeline (unchanged; byte-
+  reproducible benchmark lane; `auto_recover` default true decides
+  whether structured events self-solve).
 
-> Requires a baseline on the source instance first (`solve baseline`). **LLM narration off (default) = solver-only auto-fix**: translate/strategy/explain are answered by the deterministic degraded client, no LLM anywhere. Toggle it on to use the live provider for AI strategy + explanation.
-
-CLI equivalent: `uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json --speed 30` (add `--llm` to use the live LLM; the default is `--no-llm`, i.e. solver-only auto-fix)
+> Live-day runs are demo-grade (typed interruptions drive t — non-
+> deterministic by design); the publication benchmark uses the scripted
+> lane.
 
 #### 5. Benchmarks — Fidelity Report
 

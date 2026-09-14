@@ -34,6 +34,7 @@ uv run python -m coe.cli explain --instance I
 uv run python -m coe.cli benchmark fidelity --corpus data/corpus/fidelity-seed42 --seed 42
 uv run python -m coe.cli mqtt listen
 uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--on-clone]   # clone is default-on (disable via settings.simulate_clone); run `solve baseline` on the source instance first
+Simulate page: Live day (default; typed mid-flight disruptions) and Scripted replay (JSON; reproducible) modes.
 ```
 
 Use `uv` exclusively. Never pip, never system Python. Working from repo root is assumed (paths in tests are CWD-relative).
