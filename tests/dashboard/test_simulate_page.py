@@ -429,3 +429,141 @@ def test_live_lane_state_isolated_from_scripted(clean_db, demo_scenario,
     assert st.session_state["sim_live_clock"] == prev_live_clock
     assert st.session_state["sim_live_active"] != \
         st.session_state["sim_active_instance"]
+
+
+# ---------------------------------------------------------------------------
+# live-lane pause/resume (spec §3 step 5)
+# ---------------------------------------------------------------------------
+
+def _errors_mod():
+    m = types.ModuleType("streamlit.errors")
+    m.StreamlitAPIException = type("StreamlitAPIException", (Exception,), {})
+    return m
+
+
+def _live_st():
+    """_make_st wired for the live lane: chat seam + live radio + two
+    sidebar button columns with not-pressed defaults."""
+    st = _make_st()
+    st.chat_input = MagicMock(return_value=None)
+    st.sidebar.radio = MagicMock(return_value="Live day")
+    st.sidebar._col_run.button = MagicMock(return_value=False)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+    return st
+
+
+def _live_pace_env(monkeypatch, request):
+    """time.sleep no-op + SIMULATE_CLONE=false with a clean settings cache
+    (same pattern as test_paced_no_duplicate_lines_across_rerenders)."""
+    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+    monkeypatch.setenv("SIMULATE_CLONE", "false")
+    from coe.config import get_settings
+    get_settings.cache_clear()
+    request.addfinalizer(get_settings.cache_clear)
+
+
+def _seed_live_session(st, instance):
+    st.session_state["instance"] = instance
+    st.session_state["sim_mode"] = "live"
+    st.session_state["sim_speed"] = 30   # paced: one chunk per rerender
+
+
+def test_live_pause_holds_walk_state(monkeypatch, request):
+    """Pause freezes the walk at a chunk boundary: a paused render idly
+    holds sim_live_clock/sim_feed — no generator step, no feed growth.
+
+    No clean_db: the tests only read the active schedule (ensure_sim_
+    baseline_clone self-heals) — shares the session clone for cost."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance())
+
+    # 1. First paced render: one chunk, self-advance (rerun recorded).
+    simulate.render()
+    assert st.rerun.called
+    assert st.session_state["sim_running"] is True
+    feed_after_run = list(st.session_state["sim_feed"])
+    clock_after_run = st.session_state["sim_live_clock"]
+    assert feed_after_run
+
+    # 2. Pause press → live-lane flag set, info surfaced, page halts.
+    st.sidebar._col_pause.button = MagicMock(return_value=True)
+    with pytest.raises(SystemExit):
+        simulate.render()
+    assert st.session_state["sim_live_paused"] is True
+    assert any("Playback paused" in str(c.args[0])
+               for c in st.info.call_args_list)
+
+    # 3. Paused render (no press): idle hold — clock and feed unchanged.
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+    with pytest.raises(SystemExit):
+        simulate.render()
+    assert st.session_state["sim_feed"] == feed_after_run
+    assert st.session_state["sim_live_clock"] == clock_after_run
+    assert st.session_state["sim_live_paused"] is True
+
+
+def test_live_resume_continues(monkeypatch, request):
+    """Resume clears sim_live_paused BEFORE any early-stop; the walk
+    continues from sim_live_clock and the feed grows (no duplicate of
+    already-seen chunks)."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance())
+
+    simulate.render()
+    feed_1 = list(st.session_state["sim_feed"])
+    clock_1 = st.session_state["sim_live_clock"]
+
+    st.sidebar._col_pause.button = MagicMock(return_value=True)
+    with pytest.raises(SystemExit):
+        simulate.render()
+    assert st.session_state["sim_live_paused"] is True
+
+    # Resume press → flag cleared, walk continues from sim_live_clock.
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+    st.sidebar._col_run.button = MagicMock(return_value=True)
+    simulate.render()
+    assert st.session_state["sim_live_paused"] is False
+    assert len(st.session_state["sim_feed"]) > len(feed_1)
+    assert st.session_state["sim_live_clock"] > clock_1
+    # dedup invariant holds across the pause boundary
+    lines = [ln for ln in st.session_state["sim_feed"] if ln.strip()]
+    assert len(lines) == len(set(lines))
+
+
+def test_live_recovery_start_completes_inline(monkeypatch, request):
+    """§3 step 5 bound (lean regression): a paced render that consumes a
+    recovery_start chunk never breaks on it (the `elif rerender` break
+    excludes recovery_start) — the solve is driven to completion in the
+    SAME render pass, so a pause can only bite from the NEXT render,
+    never mid-solve. execute_recovery is stubbed (status only; the
+    inline-completion structure is what's under test)."""
+    _live_pace_env(monkeypatch, request)
+
+    import coe.agents.graph as graph_mod
+    monkeypatch.setattr(graph_mod, "execute_recovery",
+                        lambda *a, **kw: {"status": "COMMITTED"})
+
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance())
+    st.session_state["sim_chat_text"] = "M3 gearbox seized, sparks everywhere"
+
+    simulate.render()
+    feed = "\n".join(st.session_state["sim_feed"])
+    assert "recovery starting" in feed
+    assert "recovery NARRATIVE" in feed and "COMMITTED" in feed
+    assert st.session_state["sim_live_paused"] is False
+    assert st.rerun.called

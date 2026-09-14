@@ -194,6 +194,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         st.session_state["sim_feed"] = []
         st.session_state["sim_live_clock"] = 0
         st.session_state["sim_complete"] = False
+        st.session_state["sim_live_paused"] = False
         try:
             active = _fork_or_default(instance_name, "live")
         except ValueError as exc:
@@ -303,6 +304,7 @@ def render() -> None:
         ("sim_mode", "live"), ("sim_interrupt_q", None),
         ("sim_seen", set()),
         ("sim_live_active", None), ("sim_live_clock", 0),
+        ("sim_live_paused", False), ("sim_complete", False),
     ):
         st.session_state.setdefault(key, default)
 
@@ -346,6 +348,32 @@ def render() -> None:
         llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
 
     if st.session_state["sim_mode"] == "live":
+        # Sidebar Run/Pause mirroring the scripted lane (spec §3 step 5).
+        # sim_live_paused is live-lane-owned (the scripted sim_paused key
+        # stays scripted-only).
+        col_run, col_step = st.sidebar.columns(2)
+        live_paused = st.session_state["sim_live_paused"]
+        run_pressed = col_run.button(
+            "Run" if st.session_state["sim_complete"] else "Resume",
+            type="primary", key="sim_live_run",
+            disabled=st.session_state["sim_complete"])
+        pause_pressed = col_step.button(
+            "Pause", key="sim_live_pause",
+            disabled=not st.session_state["sim_running"]
+            or live_paused or speed == "instant"
+            or st.session_state["sim_complete"])
+
+        if pause_pressed:
+            st.session_state["sim_live_paused"] = True
+            st.info("Playback paused. Press Resume to continue.")
+            st.stop()
+        if run_pressed:
+            # Clear the pause BEFORE any early-stop so the walk resumes
+            # from sim_live_clock (same ordering as the scripted lane).
+            st.session_state["sim_live_paused"] = False
+        elif live_paused:
+            st.caption("Paused — press Resume.")
+            st.stop()
         _render_live(instance_name, llm_client_factory, speed)
         return
 
