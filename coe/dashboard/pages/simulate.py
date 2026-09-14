@@ -163,6 +163,23 @@ def _feed_line(chunk: dict) -> str:
     return f"[t={t:>4}] {ev}"
 
 
+def _paint_idle_feed(caption: str | None) -> None:
+    """Read-only feed panel for idle lanes (paused / complete / fresh).
+
+    The ``st.status`` container remains the sole painter mid-walk — this
+    only runs on early-return paths where the status block is skipped,
+    so the feed never vanishes on a paused/completed rerender and never
+    twin-paints while running.
+    """
+    import streamlit as st
+
+    feed = st.session_state.get("sim_feed") or []
+    if caption:
+        st.caption(caption)
+    if feed:
+        st.markdown("\n\n".join(feed))
+
+
 def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     """Live-day controller (spec §6).
 
@@ -205,9 +222,11 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
 
     if st.session_state["sim_complete"]:
         st.caption("Day complete. Select a new instance to replay.")
+        _paint_idle_feed(None)
         return
 
     st.session_state["sim_running"] = True
+    st.session_state["sim_running_lane"] = "live"
 
     # §6: the chat input renders ONLY while the walk is live. A typed
     # submission is queued and the walk reruns; the staged key is the
@@ -258,6 +277,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         except LiveDayError as exc:
             st.error(str(exc))
             st.session_state["sim_running"] = False
+            st.session_state["sim_running_lane"] = None
             st.stop()
         finally:
             # Deterministic generator close (workers pin restore), like
@@ -275,6 +295,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
 
     if terminal:
         st.session_state["sim_running"] = False
+        st.session_state["sim_running_lane"] = None
         st.session_state["sim_complete"] = True
     elif rerender:
         _time.sleep(min(60.0 / max(int(speed), 1), 10.0))
@@ -298,7 +319,8 @@ def render() -> None:
     # --- session-state contract ------------------------------------------
     for key, default in (
         ("sim_last_idx", 0), ("sim_paused", False),
-        ("sim_running", False), ("sim_clock", 0), ("sim_total", 0),
+        ("sim_running", False), ("sim_running_lane", None),
+        ("sim_clock", 0), ("sim_total", 0),
         ("sim_active_instance", None), ("sim_before_entries", None),
         ("sim_feed", []),
         ("sim_mode", "live"), ("sim_interrupt_q", None),
@@ -353,26 +375,32 @@ def render() -> None:
         # stays scripted-only).
         col_run, col_step = st.sidebar.columns(2)
         live_paused = st.session_state["sim_live_paused"]
+        # Lane-owned running flag: sim_running set by the OTHER lane must
+        # not enable this lane's Pause (or auto-drive its walk).
+        live_running = (
+            st.session_state["sim_running"]
+            and st.session_state.get("sim_running_lane") == "live")
         run_pressed = col_run.button(
             "Run" if st.session_state["sim_complete"] else "Resume",
             type="primary", key="sim_live_run",
             disabled=st.session_state["sim_complete"])
         pause_pressed = col_step.button(
             "Pause", key="sim_live_pause",
-            disabled=not st.session_state["sim_running"]
+            disabled=not live_running
             or live_paused or speed == "instant"
             or st.session_state["sim_complete"])
 
         if pause_pressed:
             st.session_state["sim_live_paused"] = True
             st.info("Playback paused. Press Resume to continue.")
+            _paint_idle_feed(None)
             st.stop()
         if run_pressed:
             # Clear the pause BEFORE any early-stop so the walk resumes
             # from sim_live_clock (same ordering as the scripted lane).
             st.session_state["sim_live_paused"] = False
         elif live_paused:
-            st.caption("Paused — press Resume.")
+            _paint_idle_feed("Paused — press Resume.")
             st.stop()
         _render_live(instance_name, llm_client_factory, speed)
         return
@@ -420,6 +448,12 @@ def render() -> None:
     st.session_state["sim_total"] = len(tl.events)
     total = len(tl.events)
     finished = st.session_state["sim_last_idx"] >= total
+    # Lane-owned running flag (see live lane): a sim_running left set by
+    # the live lane must not auto-drive the scripted walk against a
+    # stale/None sim_active_instance.
+    scripted_running = (
+        st.session_state["sim_running"]
+        and st.session_state.get("sim_running_lane") == "scripted")
 
     # --- sidebar controls (browser flow; manual_entry auto-runs below) -----
     if not manual_entry:
@@ -429,12 +463,13 @@ def render() -> None:
             key="sim_run")
         pause_pressed = col_step.button(
             "Pause", key="sim_pause",
-            disabled=not st.session_state["sim_running"]
+            disabled=not scripted_running
             or st.session_state["sim_paused"])
 
         if pause_pressed:
             st.session_state["sim_paused"] = True
             st.info("Playback paused. Press Resume to continue.")
+            _paint_idle_feed(None)
             st.stop()
     else:
         run_pressed = True
@@ -474,15 +509,27 @@ def render() -> None:
             st.session_state["sim_before_entries"] = \
                 _fetch_active_entries(active)
         st.session_state["sim_running"] = True
+        st.session_state["sim_running_lane"] = "scripted"
 
     _render_idle(tl)
     _render_day()
 
-    running = st.session_state["sim_running"]
+    # Recompute AFTER the start_run block: a fresh Run press just set
+    # sim_running/sim_running_lane above.
+    running = (st.session_state["sim_running"]
+               and st.session_state.get("sim_running_lane") == "scripted")
     paused = st.session_state["sim_paused"]
     if not running or paused:
-        st.caption("Paused — press Run/Resume." if running
-                   else "Press Run to start the scripted day.")
+        # Idle lane: keep the feed visible (paused / completed rerenders).
+        feed = st.session_state["sim_feed"]
+        if running:
+            _paint_idle_feed("Paused — press Run/Resume.")
+        elif finished and feed:
+            _paint_idle_feed("Day complete.")
+        elif not feed:
+            _paint_idle_feed("Press Run to start the scripted day.")
+        else:
+            _paint_idle_feed(None)
         return
 
     active = st.session_state["sim_active_instance"]

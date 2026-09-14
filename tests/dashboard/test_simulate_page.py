@@ -567,3 +567,165 @@ def test_live_recovery_start_completes_inline(monkeypatch, request):
     assert "recovery NARRATIVE" in feed and "COMMITTED" in feed
     assert st.session_state["sim_live_paused"] is False
     assert st.rerun.called
+
+
+# ---------------------------------------------------------------------------
+# final-review fix wave: lane-owned running flag + idle feed panel
+# ---------------------------------------------------------------------------
+
+def _scripted_pace_env(monkeypatch, script_path):
+    """Sidebar-flow scaffolding for the scripted regressions: glob → tmp
+    script, load_timeline resolves it, forking disabled."""
+    orig_glob = pathlib.Path.glob
+    fake_script = pathlib.Path(script_path)
+
+    def fake_glob(self, pattern):
+        if pattern == "*.json" and str(self) == "data/timelines":
+            return iter([fake_script])
+        return orig_glob(self, pattern)
+
+    monkeypatch.setattr(pathlib.Path, "glob", fake_glob)
+
+    import coe.simulator.timeline as tlmod
+    real_load = tlmod.load_timeline
+    monkeypatch.setattr(
+        tlmod, "load_timeline",
+        lambda p: real_load(script_path) if "tiny2.json" in str(p)
+        else real_load(p))
+
+
+def _stub_render_env(monkeypatch, st):
+    """Install the st stub + StreamlitAPIException shim for render()."""
+    from coe.dashboard.pages import simulate as sim_page
+
+    st.__path__ = []
+    errors_mod = types.ModuleType("streamlit.errors")
+    errors_mod.StreamlitAPIException = type("StreamlitAPIException",
+                                            (Exception,), {})
+    monkeypatch.setitem(sys.modules, "streamlit.errors", errors_mod)
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    return sim_page
+
+
+def test_scripted_ignores_stale_live_running_flag(
+        clean_db, tmp_path, monkeypatch):
+    """IMPORTANT-1 regression: switching Mode to Scripted replay mid-
+    live-walk leaves sim_running=True (set by the live lane). The
+    scripted arm must NOT auto-drive walk_timeline on the stale (here:
+    None) sim_active_instance — the walk block is gated on a
+    scripted-lane-owned running flag, so the idle controls render and
+    the feed/idx stay untouched."""
+    _scripted_pace_env(monkeypatch, _two_event_script(tmp_path))
+
+    st = _make_st()
+    st.sidebar._col_run.button = MagicMock(return_value=False)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+    sim_page = _stub_render_env(monkeypatch, st)
+
+    st.session_state["instance"] = "factory_demo_01"
+    st.session_state["sim_speed"] = 10
+    st.sidebar.selectbox = MagicMock(return_value="tiny2.json")
+    # stale live-walk state: the live lane set sim_running and never
+    # cleared it (mid-walk mode switch); no scripted session exists.
+    st.session_state["sim_running"] = True
+    st.session_state["sim_running_lane"] = "live"
+    st.session_state["sim_active_instance"] = None
+
+    sim_page.render()   # pre-fix: walks with instance=None → DB hit/error
+
+    assert st.session_state["sim_last_idx"] == 0
+    assert st.session_state["sim_feed"] == []
+    assert not st.rerun.called
+    assert any("Press Run to start" in str(c.args[0])
+               for c in st.caption.call_args_list)
+
+
+def test_idle_feed_panel_survives_pause_and_completion(
+        clean_db, demo_scenario, tmp_path, monkeypatch):
+    """IMPORTANT-2 regression: the event feed must stay visible when the
+    walk is NOT running — paused renders and day-complete rerenders
+    paint a read-only panel from sim_feed (the status container stays
+    the sole painter mid-walk)."""
+    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+    script_path = _two_event_script(tmp_path)
+    _scripted_pace_env(monkeypatch, script_path)
+
+    # Fork disabled for this test; keep every other setting real.
+    from coe.config import get_settings as real_get_settings
+
+    class _Settings(types.SimpleNamespace):
+        simulate_clone = False
+
+        def __getattr__(self, name):
+            return getattr(real_get_settings(), name)
+
+    monkeypatch.setattr(
+        "coe.config.get_settings", lambda: _Settings())
+
+    st = _make_st()
+    sim_page = _stub_render_env(monkeypatch, st)
+
+    col_run = st.sidebar._col_run
+    col_pause = st.sidebar._col_pause
+    pressed = {"run": False, "pause": False}
+
+    def button(label, **_kw):
+        if label in ("Run", "Resume") and pressed["run"]:
+            return True
+        if label == "Pause" and pressed["pause"]:
+            return True
+        return False
+
+    col_run.button = button
+    col_pause.button = button
+
+    st.session_state["instance"] = "factory_demo_01"
+    st.session_state["sim_speed"] = 10  # non-instant → one event / rerender
+    st.sidebar.selectbox = MagicMock(return_value="tiny2.json")
+
+    def markdown_calls():
+        return [c.args[0] for c in st.markdown.call_args_list]
+
+    # 1. Run → event 1 consumed (feed painted inside the status block).
+    pressed["run"] = True
+    sim_page.render()
+    assert st.session_state["sim_last_idx"] == 1
+    feed_line = st.session_state["sim_feed"][0]
+
+    # 2. Pause press → halted; then an idle paused rerender (no press)
+    #    must repaint the feed with a Paused caption.
+    pressed["run"] = False
+    pressed["pause"] = True
+    try:
+        sim_page.render()
+    except SystemExit:
+        pass
+    assert st.session_state["sim_paused"] is True
+    st.markdown.reset_mock()
+    st.caption.reset_mock()
+    pressed["pause"] = False
+    sim_page.render()
+    assert any("Paused" in str(c.args[0])
+               for c in st.caption.call_args_list)
+    assert any(feed_line in m for m in markdown_calls()), \
+        "paused render must repaint the feed"
+
+    # 3. Resume → event 2; 4. no press → walker yields done (terminal).
+    pressed["pause"] = False
+    pressed["run"] = True
+    sim_page.render()
+    assert st.session_state["sim_last_idx"] == 2
+    pressed["run"] = False
+    sim_page.render()
+    assert st.session_state["sim_running"] is False
+    assert len(st.session_state["sim_feed"]) == 2
+
+    # 5. Idle rerender after completion → "Day complete." + full feed.
+    st.markdown.reset_mock()
+    st.caption.reset_mock()
+    sim_page.render()
+    assert any("Day complete" in str(c.args[0])
+               for c in st.caption.call_args_list)
+    assert markdown_calls() == [
+        "\n\n".join(st.session_state["sim_feed"])], \
+        "day-complete rerender must repaint the feed"
