@@ -1,5 +1,12 @@
 # tests/dashboard/test_simulate_page.py
-"""AppTest smoke + paced-browser rerender sequence for the Simulate page."""
+"""
+AppTest smoke + paced-browser rerender sequence for the Simulate page.
+
+Log-surface invariant (bug 2026-09-16): the event feed paints from ONE
+plain-markdown surface in every state — running (after the status
+block), paused, complete, and fresh. No expander, no per-state variant
+component.
+"""
 import json
 import pathlib
 import sys
@@ -58,6 +65,36 @@ def test_page_smoke(clean_db, demo_scenario, tmp_path):
     assert st.session_state.get("sim_last_idx", 0) >= 1
 
 
+def test_log_paints_capped_tail(monkeypatch, request):
+    """Bug 2026-09-16 (user report): repainting the FULL growing log every
+    paced rerender competes with the future Gantt for render time. The
+    single surface must paint a CAPPED TAIL (last 10 lines) in a fixed-
+    height scroll container plus a 'showing N of M' caption; full history
+    stays in sim_feed."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance(), press=True)
+    st.session_state["sim_speed"] = "instant"   # walk the WHOLE day now
+                                                # (paced yields one chunk
+                                                # per stubbed render)
+
+    simulate.render()
+    feed = list(st.session_state["sim_feed"])
+    assert len(feed) > 10, "baseline day must exceed the cap for the tail"
+
+    simulate._paint_idle_feed(None)
+    md = st.markdown.call_args_list[-1].args[0]
+    rendered_lines = [ln for ln in md.split("\n\n") if ln.strip()]
+    assert len(rendered_lines) == 10
+    assert rendered_lines[0] == feed[-10]
+    assert rendered_lines[-1] == feed[-1]
+    assert rendered_lines == feed[-10:]
+
+
 # ---------------------------------------------------------------------------
 # paced-browser rerender sequence: Run → Pause → Resume → Terminal
 # ---------------------------------------------------------------------------
@@ -108,10 +145,14 @@ def _make_st():
         __exit__=MagicMock(),
         update=MagicMock()))
     st.empty = MagicMock(return_value=MagicMock(markdown=MagicMock()))
-    st.expander = MagicMock(return_value=MagicMock(
+    st.container = MagicMock(return_value=MagicMock(
         __enter__=lambda s: s,
-        __exit__=MagicMock(),
-        empty=MagicMock(return_value=MagicMock(markdown=MagicMock()))))
+        __exit__=MagicMock(return_value=False),
+        markdown=MagicMock()))
+    # NOTE: deliberately NOT stubbing st.expander — the event log must
+    # paint through exactly ONE plain-markdown surface in EVERY lane
+    # state (running/paused/complete); an expander call in render()
+    # fails with AttributeError instead of silently double-painting.
     return st
 
 

@@ -164,6 +164,40 @@ def _feed_line(chunk: dict) -> str:
     return f"[t={t:>4}] {ev}"
 
 
+_LOG_TAIL = 10
+_LOG_VIEWPORT = 160
+
+
+def _paint_idle_feed(caption: str | None) -> None:
+    """THE single event-log surface (bug 2026-09-16 fix).
+
+    Plain markdown, painted in every state — before a walk, mid-walk
+    directly on the page body (a st.status is itself a collapsible
+    dropdown whose open/close presentation replays on every rerender,
+    so it must never wrap the log), when paused, and when complete.
+    Two painters = two looks (the pause "different component"); both
+    lanes call only this painter.
+
+    Render-cost cap (bug 2026-09-16, second report): only the LAST
+    ``_LOG_TAIL`` lines paint, inside a fixed-height scroll container —
+    the paint stays constant-size however long the day runs, so it can
+    never starve the board. Full history remains in ``sim_feed``; the
+    count caption tells the user the log is truncated on screen.
+    """
+    import streamlit as st
+
+    feed = st.session_state.get("sim_feed") or []
+    if caption:
+        st.caption(caption)
+    if not feed:
+        return
+    tail = feed[-_LOG_TAIL:]
+    if len(feed) > len(tail):
+        st.caption(f"showing last {len(tail)} of {len(feed)} events")
+    with st.container(height=_LOG_VIEWPORT):
+        st.markdown("\n\n".join(tail))
+
+
 def _ensure_live_lane(instance_name: str) -> str:
     """Create/reset the live lane's private state and return the fork to
     play. Runs at mode entry EVEN when the lane is idle (a fresh render
@@ -201,40 +235,6 @@ def _ensure_live_lane(instance_name: str) -> str:
     return st.session_state["sim_live_active"]
 
 
-def _paint_idle_feed(caption: str | None) -> None:
-    """Read-only feed panel for idle lanes (paused / complete / fresh).
-
-    The ``st.status`` container remains the sole painter mid-walk — this
-    only runs on early-return paths where the status block is skipped,
-    so the feed never vanishes on a paused/completed rerender and never
-    twin-paints while running.
-    """
-    import streamlit as st
-
-    feed = st.session_state.get("sim_feed") or []
-    if caption:
-        st.caption(caption)
-    if feed:
-        with _feed_box():
-            st.markdown("\n\n".join(feed))
-
-
-def _feed_box():
-    """Keyed expander hosting the event log.
-
-    Streamlit ≥1.39 stores an expander's open/closed state under ``key``
-    across rerenders, so paced self-advancing rerenders never collapse
-    the log against the user's will. Callers paint INSIDE the container
-    (context manager or a nested ``.empty()`` slot).
-    """
-    import streamlit as st
-
-    return st.expander(
-        "Event log",
-        expanded=st.session_state.get("sim_feed_open", False),
-        key="sim_feed_open")
-
-
 def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     """Live-day walk (spec §6) — caller has validated run/pause state.
 
@@ -269,58 +269,52 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     if chat:
         st.session_state["sim_interrupt_q"].push(chat)
 
-    with st.status("Simulating day…", expanded=True) as status:
-        feed_area = _feed_box().empty()
+    # No status container at all: a "Simulating day…" st.status is itself
+    # a collapsible dropdown that replays open/close presentation on
+    # every paced rerender. The painted log is the walk's feedback.
+    def _record(chunk: dict) -> None:
+        key = (chunk.get("t"), chunk.get("event"))
+        if key in st.session_state["sim_seen"]:
+            return
+        st.session_state["sim_seen"].add(key)
+        st.session_state["sim_feed"].append(_feed_line(chunk))
+        st.session_state["sim_live_clock"] = chunk["t"]
 
-        def _flush() -> None:
-            feed_area.markdown("\n\n".join(st.session_state["sim_feed"]))
-
-        def _record(chunk: dict) -> None:
-            key = (chunk.get("t"), chunk.get("event"))
-            if key in st.session_state["sim_seen"]:
-                return
-            st.session_state["sim_seen"].add(key)
-            st.session_state["sim_feed"].append(_feed_line(chunk))
-            st.session_state["sim_live_clock"] = chunk["t"]
-            _flush()
-
-        terminal = False
-        rerender = False
-        gen = live_day(active, speed="instant",
-                       llm_client_factory=llm_client_factory,
-                       start_clock=st.session_state["sim_live_clock"],
-                       interrupt_queue=st.session_state["sim_interrupt_q"])
-        try:
+    terminal = False
+    rerender = False
+    gen = live_day(active, speed="instant",
+                   llm_client_factory=llm_client_factory,
+                   start_clock=st.session_state["sim_live_clock"],
+                   interrupt_queue=st.session_state["sim_interrupt_q"])
+    try:
+        chunk = next(gen, None)
+        while chunk is not None:
+            _record(chunk)
+            if chunk["event"] == "day_end":
+                terminal = True
+                break
+            if speed != "instant" and chunk["event"] != "recovery_start":
+                # one dwell per rerender; recovery completes inline
+                rerender = True
+                break
             chunk = next(gen, None)
-            while chunk is not None:
-                _record(chunk)
-                if chunk["event"] == "day_end":
-                    terminal = True
-                    break
-                if speed != "instant" and chunk["event"] != "recovery_start":
-                    # one dwell per rerender; recovery completes inline
-                    rerender = True
-                    break
-                chunk = next(gen, None)
-        except LiveDayError as exc:
-            st.error(str(exc))
-            st.session_state["sim_running"] = False
-            st.session_state["sim_running_lane"] = None
-            st.stop()
-        finally:
-            # Deterministic generator close (workers pin restore), like
-            # the scripted lane; a completed/dead generator may raise.
-            try:
-                gen.close()
-            except Exception:
-                pass
+    except LiveDayError as exc:
+        st.error(str(exc))
+        st.session_state["sim_running"] = False
+        st.session_state["sim_running_lane"] = None
+        st.stop()
+    finally:
+        # Deterministic generator close (workers pin restore), like
+        # the scripted lane; a completed/dead generator may raise.
         try:
-            status.update(
-                label="Day complete" if terminal else "Simulating…",
-                state="complete" if terminal else "running")
-        except (StreamlitAPIException, AttributeError):
+            gen.close()
+        except Exception:
             pass
 
+    # ONE log surface: always painted, no container chrome around it.
+    _paint_idle_feed(
+        "Day complete. Select a new instance to replay."
+        if terminal else None)
     if terminal:
         st.session_state["sim_running"] = False
         st.session_state["sim_running_lane"] = None
@@ -355,7 +349,6 @@ def render() -> None:
         ("sim_seen", set()),
         ("sim_live_active", None), ("sim_live_clock", 0),
         ("sim_live_paused", False), ("sim_complete", False),
-        ("sim_feed_open", False),
     ):
         st.session_state.setdefault(key, default)
 
@@ -587,132 +580,118 @@ def render() -> None:
     before_entries = st.session_state["sim_before_entries"]
 
     terminal = None
-    # Cockpit-style context manager so the live feed renders inside the
-    # status container; the exception-guard shim stays for bare-mode.
-    with st.status("Simulating day…", expanded=True) as status:
-        feed_area = _feed_box().empty()
+    # walk-only pass; the log paints through the single surface below
+    if speed == "instant":
+        # Instant walks complete synchronously in ONE render pass —
+        # safe inside a st.status block (no threading; RunManager lesson).
+        for chunk in walk_timeline(
+            tl, instance_name=active, speed="instant",
+            llm_client_factory=llm_client_factory,
+            start_index=st.session_state["sim_last_idx"],
+        ):
+            if chunk["event"] == "done":
+                terminal = chunk
+                break
+            if chunk["event"] == "recovery_start":
+                # Do NOT advance sim_last_idx — the completion chunk
+                # advances it. Surface that this step is live.
+                key = (chunk.get("t"), chunk.get("event"))
+                if key in st.session_state["sim_seen"]:
+                    continue
+                st.session_state["sim_seen"].add(key)
+                st.session_state["sim_feed"].append(
+                    f"[t={chunk['t']:>4}] ⏳ recovery starting "
+                    f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
+                    " this takes minutes (translate + solver floor)…")
 
-        def _flush() -> None:
-            feed_area.markdown("\n\n".join(st.session_state["sim_feed"]))
+                continue
+            st.session_state["sim_last_idx"] = chunk["idx"] + 1
+            st.session_state["sim_clock"] = chunk["t"]
+            key = (chunk.get("t"), chunk.get("event"))
+            if key not in st.session_state["sim_seen"]:
+                st.session_state["sim_seen"].add(key)
+                if chunk["event"] == "recovery":
+                    status = chunk.get("status", "?")
+                    mark = "✓" if status == "COMMITTED" else f"✗ {status}"
+                    st.session_state["sim_feed"].append(
+                        f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
+                        f"{mark}")
+                else:
+                    st.session_state["sim_feed"].append(
+                        f"[t={chunk['t']:>4}] {chunk['event']} "
+                        f"{chunk.get('kind', '')}".rstrip())
 
-        if speed == "instant":
-            # Instant walks complete synchronously in ONE render pass —
-            # safe inside a st.status block (no threading; RunManager lesson).
-            for chunk in walk_timeline(
-                tl, instance_name=active, speed="instant",
-                llm_client_factory=llm_client_factory,
-                start_index=st.session_state["sim_last_idx"],
-            ):
+    else:
+        # Paced mode: ONE full terminator per auto-rerender,
+        # st.rerun() self-advancement. A fresh generator is created
+        # on every rerender; the engine skips idx < start_index
+        # (already persisted) and runs silently instant — the page
+        # owns the pacing clock via the pause toggle + Run/Resume
+        # buttons. recovery_start / auto_recover chunks NEVER
+        # advance sim_last_idx and never break the loop — the walk
+        # is driven to the next terminator (ingest chunk or
+        # recovery completion) INSIDE this rerender so a narrative
+        # solve finishes inline; the generator is only ever closed
+        # at a yield boundary, never mid-recovery.
+        gen = walk_timeline(tl, instance_name=active, speed="instant",
+                            llm_client_factory=llm_client_factory,
+                            start_index=st.session_state["sim_last_idx"])
+        try:
+            while True:
+                chunk = next(gen, None)
+                if chunk is None:
+                    terminal = {"event": "done", "committed": []}
+                    break
                 if chunk["event"] == "done":
                     terminal = chunk
                     break
-                if chunk["event"] == "recovery_start":
-                    # Do NOT advance sim_last_idx — the completion chunk
-                    # advances it. Surface that this step is live.
-                    key = (chunk.get("t"), chunk.get("event"))
-                    if key in st.session_state["sim_seen"]:
-                        continue
-                    st.session_state["sim_seen"].add(key)
-                    st.session_state["sim_feed"].append(
-                        f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                        f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
-                        " this takes minutes (translate + solver floor)…")
-                    _flush()
-                    continue
-                st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                st.session_state["sim_clock"] = chunk["t"]
                 key = (chunk.get("t"), chunk.get("event"))
-                if key not in st.session_state["sim_seen"]:
-                    st.session_state["sim_seen"].add(key)
-                    if chunk["event"] == "recovery":
-                        status = chunk.get("status", "?")
-                        mark = "✓" if status == "COMMITTED" else f"✗ {status}"
-                        st.session_state["sim_feed"].append(
-                            f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
-                            f"{mark}")
-                    else:
-                        st.session_state["sim_feed"].append(
-                            f"[t={chunk['t']:>4}] {chunk['event']} "
+                if key in st.session_state["sim_seen"]:
+                    if chunk["event"] in ("ingest", "recovery"):
+                        break
+                    continue
+                st.session_state["sim_seen"].add(key)
+                if chunk["event"] == "recovery":
+                    status = chunk.get("status", "?")
+                    mark = ("✓ COMMITTED" if status == "COMMITTED"
+                            else f"✗ {status}")
+                    line = (f"[t={chunk['t']:>4}] recovery "
+                            f"{chunk.get('kind', '')} — {mark}")
+                    st.session_state["sim_last_idx"] = chunk["idx"] + 1
+                elif chunk["event"] == "recovery_start":
+                    who = ("live LLM" if chunk.get("live")
+                           else "auto-fix (no LLM)")
+                    line = (f"[t={chunk['t']:>4}] ⏳ recovery starting "
+                            f"({who}) — solving…")
+                elif chunk["event"] == "auto_recover":
+                    line = f"[t={chunk['t']:>4}] auto_recover"
+                else:
+                    line = (f"[t={chunk['t']:>4}] {chunk['event']} "
                             f"{chunk.get('kind', '')}".rstrip())
-                    _flush()
-        else:
-            # Paced mode: ONE full terminator per auto-rerender,
-            # st.rerun() self-advancement. A fresh generator is created
-            # on every rerender; the engine skips idx < start_index
-            # (already persisted) and runs silently instant — the page
-            # owns the pacing clock via the pause toggle + Run/Resume
-            # buttons. recovery_start / auto_recover chunks NEVER
-            # advance sim_last_idx and never break the loop — the walk
-            # is driven to the next terminator (ingest chunk or
-            # recovery completion) INSIDE this rerender so a narrative
-            # solve finishes inline; the generator is only ever closed
-            # at a yield boundary, never mid-recovery.
-            gen = walk_timeline(tl, instance_name=active, speed="instant",
-                                llm_client_factory=llm_client_factory,
-                                start_index=st.session_state["sim_last_idx"])
+                    st.session_state["sim_last_idx"] = chunk["idx"] + 1
+                    st.session_state["sim_clock"] = chunk["t"]
+                st.session_state["sim_feed"].append(line)
+
+                if chunk["event"] not in ("recovery_start",
+                                          "auto_recover"):
+                    break         # terminator → return control
+        finally:
             try:
-                while True:
-                    chunk = next(gen, None)
-                    if chunk is None:
-                        terminal = {"event": "done", "committed": []}
-                        break
-                    if chunk["event"] == "done":
-                        terminal = chunk
-                        break
-                    key = (chunk.get("t"), chunk.get("event"))
-                    if key in st.session_state["sim_seen"]:
-                        if chunk["event"] in ("ingest", "recovery"):
-                            break
-                        continue
-                    st.session_state["sim_seen"].add(key)
-                    if chunk["event"] == "recovery":
-                        status = chunk.get("status", "?")
-                        mark = ("✓ COMMITTED" if status == "COMMITTED"
-                                else f"✗ {status}")
-                        line = (f"[t={chunk['t']:>4}] recovery "
-                                f"{chunk.get('kind', '')} — {mark}")
-                        st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                    elif chunk["event"] == "recovery_start":
-                        who = ("live LLM" if chunk.get("live")
-                               else "auto-fix (no LLM)")
-                        line = (f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                                f"({who}) — solving…")
-                    elif chunk["event"] == "auto_recover":
-                        line = f"[t={chunk['t']:>4}] auto_recover"
-                    else:
-                        line = (f"[t={chunk['t']:>4}] {chunk['event']} "
-                                f"{chunk.get('kind', '')}".rstrip())
-                        st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                        st.session_state["sim_clock"] = chunk["t"]
-                    st.session_state["sim_feed"].append(line)
-                    _flush()
-                    if chunk["event"] not in ("recovery_start",
-                                              "auto_recover"):
-                        break         # terminator → return control
-            finally:
-                try:
-                    gen.close()
-                except Exception:
-                    pass
-            # auto-advance: one dwell, then a fresh rerender drives the
-            # next slice (Bug 1 dies — no single green button press
-            # needed per event).
-            if terminal is None and not st.session_state.get("sim_paused"):
-                import time
+                gen.close()
+            except Exception:
+                pass
+        # auto-advance: one dwell, then a fresh rerender drives the
+        # next slice (Bug 1 dies — no single green button press
+        # needed per event).
+        if terminal is None and not st.session_state.get("sim_paused"):
+            import time
 
-                time.sleep(min(_walk_paced_seconds(speed), 2.0))
-                st.rerun()
+            time.sleep(min(_walk_paced_seconds(speed), 2.0))
+            st.rerun()
 
-        try:
-            status.update(
-                label="Day complete" if terminal is not None else "Simulating…",
-                state="complete" if terminal is not None else "running",
-            )
-        except (StreamlitAPIException, AttributeError):
-            # bare Streamlit (tests): status containers have no update()
-            # (bare-mode StatusContainer.__enter__ may return None)
-            pass
-
+    # ONE log surface: painted after the walk in every pass outcome
+    # (complete / mid-walk).
+    _paint_idle_feed(None)
     if terminal is not None:
         st.session_state["sim_running"] = False
         st.session_state["sim_last_idx"] = total
