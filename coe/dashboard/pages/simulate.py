@@ -1,9 +1,10 @@
 """Simulate page — live-day + scripted-day playback with pacing controls.
 
-Test seam: a *staged* chat submission may be injected via
-``st.session_state["sim_chat_text"]`` before ``render()``; the production
-path is the ``st.chat_input`` on the page itself (§6). Staged text is
-consumed once into the InterruptQueue, exactly as typed input would be.
+Test seams: a *staged* chat submission may be injected via
+``st.session_state["sim_chat_text"]`` and a *staged* Run/Resume press via
+``st.session_state["sim_run_pressed"]`` before ``render()``; the production
+paths are the page's own ``st.chat_input`` / Resume button (§6). Staged
+values are consumed exactly as real input would be.
 """
 from __future__ import annotations
 
@@ -163,39 +164,13 @@ def _feed_line(chunk: dict) -> str:
     return f"[t={t:>4}] {ev}"
 
 
-def _paint_idle_feed(caption: str | None) -> None:
-    """Read-only feed panel for idle lanes (paused / complete / fresh).
-
-    The ``st.status`` container remains the sole painter mid-walk — this
-    only runs on early-return paths where the status block is skipped,
-    so the feed never vanishes on a paused/completed rerender and never
-    twin-paints while running.
-    """
+def _ensure_live_lane(instance_name: str) -> str:
+    """Create/reset the live lane's private state and return the fork to
+    play. Runs at mode entry EVEN when the lane is idle (a fresh render
+    must not fork off a walk — only a Resume press starts one)."""
     import streamlit as st
 
-    feed = st.session_state.get("sim_feed") or []
-    if caption:
-        st.caption(caption)
-    if feed:
-        st.markdown("\n\n".join(feed))
-
-
-def _render_live(instance_name: str, llm_client_factory, speed) -> None:
-    """Live-day controller (spec §6).
-
-    Self-driving: instant = the whole day in ONE render pass; paced =
-    ONE chunk per rerender with ``st.rerun()`` self-advancement
-    (recovery chunks always complete inline — never discarded
-    mid-recovery). The generator itself always runs ``instant``; the
-    page owns the pacing clock (same controller semantics as the
-    scripted paced lane).
-    """
-    import time as _time
-
-    import streamlit as st
-    from streamlit.errors import StreamlitAPIException
-
-    from coe.simulator.live import InterruptQueue, LiveDayError, live_day
+    from coe.simulator.live import InterruptQueue
 
     st.session_state.setdefault("sim_complete", False)
 
@@ -212,19 +187,72 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         st.session_state["sim_live_clock"] = 0
         st.session_state["sim_complete"] = False
         st.session_state["sim_live_paused"] = False
+        # a fresh day must not inherit a stale running flag (or it would
+        # auto-walk before any Resume press)
+        if st.session_state.get("sim_running_lane") == "live":
+            st.session_state["sim_running"] = False
+            st.session_state["sim_running_lane"] = None
         try:
             active = _fork_or_default(instance_name, "live")
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
         st.session_state["sim_live_active"] = active
+    return st.session_state["sim_live_active"]
+
+
+def _paint_idle_feed(caption: str | None) -> None:
+    """Read-only feed panel for idle lanes (paused / complete / fresh).
+
+    The ``st.status`` container remains the sole painter mid-walk — this
+    only runs on early-return paths where the status block is skipped,
+    so the feed never vanishes on a paused/completed rerender and never
+    twin-paints while running.
+    """
+    import streamlit as st
+
+    feed = st.session_state.get("sim_feed") or []
+    if caption:
+        st.caption(caption)
+    if feed:
+        with _feed_box():
+            st.markdown("\n\n".join(feed))
+
+
+def _feed_box():
+    """Keyed expander hosting the event log.
+
+    Streamlit ≥1.39 stores an expander's open/closed state under ``key``
+    across rerenders, so paced self-advancing rerenders never collapse
+    the log against the user's will. Callers paint INSIDE the container
+    (context manager or a nested ``.empty()`` slot).
+    """
+    import streamlit as st
+
+    return st.expander(
+        "Event log",
+        expanded=st.session_state.get("sim_feed_open", False),
+        key="sim_feed_open")
+
+
+def _render_live(instance_name: str, llm_client_factory, speed) -> None:
+    """Live-day walk (spec §6) — caller has validated run/pause state.
+
+    Self-driving: instant = the whole day in ONE render pass; paced =
+    ONE chunk per rerender with ``st.rerun()`` self-advancement
+    (recovery chunks always complete inline — never discarded
+    mid-recovery). The generator itself always runs ``instant``; the
+    page owns the pacing clock (same controller semantics as the
+    scripted paced lane).
+    """
+    import time as _time
+
+    import streamlit as st
+    from streamlit.errors import StreamlitAPIException
+
+    from coe.simulator.live import LiveDayError, live_day
+
     active = st.session_state["sim_live_active"]
-
-    if st.session_state["sim_complete"]:
-        st.caption("Day complete. Select a new instance to replay.")
-        _paint_idle_feed(None)
-        return
-
     st.session_state["sim_running"] = True
     st.session_state["sim_running_lane"] = "live"
 
@@ -242,7 +270,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         st.session_state["sim_interrupt_q"].push(chat)
 
     with st.status("Simulating day…", expanded=True) as status:
-        feed_area = st.empty()
+        feed_area = _feed_box().empty()
 
         def _flush() -> None:
             feed_area.markdown("\n\n".join(st.session_state["sim_feed"]))
@@ -327,6 +355,7 @@ def render() -> None:
         ("sim_seen", set()),
         ("sim_live_active", None), ("sim_live_clock", 0),
         ("sim_live_paused", False), ("sim_complete", False),
+        ("sim_feed_open", False),
     ):
         st.session_state.setdefault(key, default)
 
@@ -370,6 +399,16 @@ def render() -> None:
         llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
 
     if st.session_state["sim_mode"] == "live":
+        # Lane setup ALWAYS runs at mode entry (used to own forking) —
+        # but the WALK itself starts only on a Resume press or a paced
+        # self-advancing rerender of an already-running lane. A fresh
+        # session no longer auto-starts the day (user report 2026-09-15).
+        if st.session_state["sim_complete"]:
+            st.caption("Day complete. Select a new instance to replay.")
+            _paint_idle_feed(None)
+            return
+        active_lane = _ensure_live_lane(instance_name)
+
         # Sidebar Run/Pause mirroring the scripted lane (spec §3 step 5).
         # sim_live_paused is live-lane-owned (the scripted sim_paused key
         # stays scripted-only).
@@ -380,10 +419,12 @@ def render() -> None:
         live_running = (
             st.session_state["sim_running"]
             and st.session_state.get("sim_running_lane") == "live")
-        run_pressed = col_run.button(
-            "Run" if st.session_state["sim_complete"] else "Resume",
-            type="primary", key="sim_live_run",
-            disabled=st.session_state["sim_complete"])
+        run_pressed = (
+            col_run.button(
+                "Run" if st.session_state["sim_complete"] else "Resume",
+                type="primary", key="sim_live_run",
+                disabled=st.session_state["sim_complete"])
+            or bool(st.session_state.pop("sim_run_pressed", False)))
         pause_pressed = col_step.button(
             "Pause", key="sim_live_pause",
             disabled=not live_running
@@ -392,6 +433,10 @@ def render() -> None:
 
         if pause_pressed:
             st.session_state["sim_live_paused"] = True
+            # a paused lane is no longer walking: clear the flags so a
+            # fresh rerender cannot self-advance while paused
+            st.session_state["sim_running"] = False
+            st.session_state["sim_running_lane"] = None
             st.info("Playback paused. Press Resume to continue.")
             _paint_idle_feed(None)
             st.stop()
@@ -399,10 +444,16 @@ def render() -> None:
             # Clear the pause BEFORE any early-stop so the walk resumes
             # from sim_live_clock (same ordering as the scripted lane).
             st.session_state["sim_live_paused"] = False
+            _render_live(active_lane, llm_client_factory, speed)
+        elif live_running:
+            # paced self-advancement rerender: no press, keep walking
+            _render_live(active_lane, llm_client_factory, speed)
         elif live_paused:
             _paint_idle_feed("Paused — press Resume.")
             st.stop()
-        _render_live(instance_name, llm_client_factory, speed)
+        else:
+            _paint_idle_feed("Press Resume to start the live day.")
+            st.stop()
         return
 
     # --- timeline source ---------------------------------------------------
@@ -539,7 +590,7 @@ def render() -> None:
     # Cockpit-style context manager so the live feed renders inside the
     # status container; the exception-guard shim stays for bare-mode.
     with st.status("Simulating day…", expanded=True) as status:
-        feed_area = st.empty()
+        feed_area = _feed_box().empty()
 
         def _flush() -> None:
             feed_area.markdown("\n\n".join(st.session_state["sim_feed"]))

@@ -108,6 +108,10 @@ def _make_st():
         __exit__=MagicMock(),
         update=MagicMock()))
     st.empty = MagicMock(return_value=MagicMock(markdown=MagicMock()))
+    st.expander = MagicMock(return_value=MagicMock(
+        __enter__=lambda s: s,
+        __exit__=MagicMock(),
+        empty=MagicMock(return_value=MagicMock(markdown=MagicMock()))))
     return st
 
 
@@ -360,11 +364,33 @@ def test_live_mode_runs_to_end_instantly(clean_db, demo_scenario):
     st.session_state["instance"] = _baseline_instance()
     st.session_state["sim_mode"] = "live"
     st.session_state["sim_speed"] = "instant"
+    st.session_state["sim_run_pressed"] = True
     simulate.render()
     feed = list(st.session_state["sim_feed"])
     assert any("day_end" in ln for ln in feed)
     assert len(feed) == len(set(feed))
     assert not any("recovery" in ln for ln in feed)
+
+
+def test_live_mode_does_not_autostart(clean_db, demo_scenario):
+    """Regression (user report 2026-09-15): a fresh live session must
+    NOT walk the day before a Resume press — idle render paints a hint
+    and leaves the feed empty."""
+    st = _fresh_streamlit()
+
+    from coe.dashboard.pages import simulate
+
+    st.session_state["instance"] = _baseline_instance()
+    st.session_state["sim_mode"] = "live"
+    st.session_state["sim_speed"] = "instant"
+    st.session_state.pop("sim_run_pressed", None)
+    try:
+        simulate.render()
+    except SystemExit:      # bare-mode st.stop()
+        pass
+    assert st.session_state["sim_feed"] == []
+    assert st.session_state["sim_live_clock"] == 0
+    assert st.session_state.get("sim_running") is False
 
 
 def test_live_chat_queues_and_solves(clean_db, demo_scenario):
@@ -377,6 +403,7 @@ def test_live_chat_queues_and_solves(clean_db, demo_scenario):
     st.session_state["instance"] = _baseline_instance()
     st.session_state["sim_mode"] = "live"
     st.session_state["sim_speed"] = "instant"
+    st.session_state["sim_run_pressed"] = True
     st.session_state["sim_chat_text"] = "M3 gearbox seized, sparks everywhere"
     simulate.render()
     joined = "\n".join(st.session_state["sim_feed"])
@@ -462,10 +489,12 @@ def _live_pace_env(monkeypatch, request):
     request.addfinalizer(get_settings.cache_clear)
 
 
-def _seed_live_session(st, instance):
+def _seed_live_session(st, instance, press=False):
     st.session_state["instance"] = instance
     st.session_state["sim_mode"] = "live"
     st.session_state["sim_speed"] = 30   # paced: one chunk per rerender
+    if press:
+        st.session_state["sim_run_pressed"] = True
 
 
 def test_live_pause_holds_walk_state(monkeypatch, request):
@@ -480,9 +509,8 @@ def test_live_pause_holds_walk_state(monkeypatch, request):
 
     monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
     monkeypatch.setitem(sys.modules, "streamlit", st)
-    _seed_live_session(st, _baseline_instance())
-
-    # 1. First paced render: one chunk, self-advance (rerun recorded).
+    # 1. First paced render (Run press): one chunk, self-advance.
+    _seed_live_session(st, _baseline_instance(), press=True)
     simulate.render()
     assert st.rerun.called
     assert st.session_state["sim_running"] is True
@@ -517,7 +545,7 @@ def test_live_resume_continues(monkeypatch, request):
 
     monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
     monkeypatch.setitem(sys.modules, "streamlit", st)
-    _seed_live_session(st, _baseline_instance())
+    _seed_live_session(st, _baseline_instance(), press=True)
 
     simulate.render()
     feed_1 = list(st.session_state["sim_feed"])
@@ -558,7 +586,7 @@ def test_live_recovery_start_completes_inline(monkeypatch, request):
 
     monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
     monkeypatch.setitem(sys.modules, "streamlit", st)
-    _seed_live_session(st, _baseline_instance())
+    _seed_live_session(st, _baseline_instance(), press=True)
     st.session_state["sim_chat_text"] = "M3 gearbox seized, sparks everywhere"
 
     simulate.render()

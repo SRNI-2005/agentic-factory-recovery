@@ -52,6 +52,38 @@ def _uninstall_st():
 # import smoke
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="module", autouse=True)
+def _prewarm_agent_chain():
+    """Import the ENTIRE coe.agents.* tree BEFORE any patch window opens.
+
+    Regression (2026-09-16): `test_render_committed_recovery` & friends
+    patch ``coe.config.get_settings`` and the page's LAZY import
+    (cockpit.py:101 -> coe.agents.graph) then imported the whole agent
+    tree for the first time UNDER the mock — permanently baking the
+    MagicMock into ``manager.py``'s module-level ``get_settings`` name
+    (patch() can only restore what it recorded). Every later real
+    recovery solve in the same pytest process then read `MagicMock` as
+    ``solver_time_limit_seconds`` -> TypeError -> STREAMING_ERROR in the
+    Simulate-page chat test. Warming the imports in an unpatched context
+    binds the real function everywhere before any test can mock.
+    """
+    import coe.dashboard.pages.cockpit  # noqa: F401 (imports graph chain)
+    import coe.agents.graph  # noqa: F401
+    import coe.agents.nodes.manager  # noqa: F401
+
+
+def test_prewarm_binds_real_settings():
+    """Leak-proof guard: no patching oddity may ever leave a mock bound
+    into a module namespace — manager must hold the REAL lru-wrapped
+    get_settings."""
+    from unittest import mock as _mock
+    import coe.agents.nodes.manager
+    assert not isinstance(coe.agents.nodes.manager.get_settings,
+                          _mock.MagicMock)
+    assert coe.agents.nodes.manager.get_settings == \
+        __import__("coe.config", fromlist=["get_settings"]).get_settings
+
+
 def test_cockpit_page_imports():
     import coe.dashboard.pages.cockpit as mod
     assert hasattr(mod, "render")
