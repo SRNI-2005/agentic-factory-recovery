@@ -88,7 +88,9 @@ def test_log_paints_capped_tail(monkeypatch, request):
 
     simulate._paint_idle_feed(None)
     md = st.markdown.call_args_list[-1].args[0]
-    rendered_lines = [ln for ln in md.split("\n\n") if ln.strip()]
+    # hard line breaks (two-space + newline) = tight 10-row block
+    rendered_lines = [ln.rstrip() for ln in md.split("\n")]
+    assert st.container.call_args_list[-1].kwargs.get("height") >= 280
     assert len(rendered_lines) == 10
     assert rendered_lines[0] == feed[-10]
     assert rendered_lines[-1] == feed[-1]
@@ -425,10 +427,9 @@ def test_live_mode_does_not_autostart(clean_db, demo_scenario):
     st.session_state["sim_mode"] = "live"
     st.session_state["sim_speed"] = "instant"
     st.session_state.pop("sim_run_pressed", None)
-    try:
-        simulate.render()
-    except SystemExit:      # bare-mode st.stop()
-        pass
+    simulate.render()    # idle path paints a hint and RETURNS normally
+                         # (st.stop after a paint would orphan elements —
+                         # double-log bug 2026-09-16)
     assert st.session_state["sim_feed"] == []
     assert st.session_state["sim_live_clock"] == 0
     assert st.session_state.get("sim_running") is False
@@ -559,18 +560,22 @@ def test_live_pause_holds_walk_state(monkeypatch, request):
     clock_after_run = st.session_state["sim_live_clock"]
     assert feed_after_run
 
-    # 2. Pause press → live-lane flag set, info surfaced, page halts.
+    # 2. Pause press → live-lane flag set, info surfaced, page RETURNS
+    #    normally (no st.stop after a paint: orphans the element tree)
+    #    and paints the FULL history (scrollback restored).
     st.sidebar._col_pause.button = MagicMock(return_value=True)
-    with pytest.raises(SystemExit):
-        simulate.render()
+    simulate.render()
     assert st.session_state["sim_live_paused"] is True
     assert any("Playback paused" in str(c.args[0])
                for c in st.info.call_args_list)
+    paused_paint = st.markdown.call_args_list[-1].args[0]
+    assert paused_paint.split("\n")[0].rstrip() == feed_after_run[0], \
+        "paused paint must start from the day's first event (full log)"
 
     # 3. Paused render (no press): idle hold — clock and feed unchanged.
     st.sidebar._col_pause.button = MagicMock(return_value=False)
-    with pytest.raises(SystemExit):
-        simulate.render()
+    st.markdown.reset_mock()
+    simulate.render()
     assert st.session_state["sim_feed"] == feed_after_run
     assert st.session_state["sim_live_clock"] == clock_after_run
     assert st.session_state["sim_live_paused"] is True
@@ -593,8 +598,7 @@ def test_live_resume_continues(monkeypatch, request):
     clock_1 = st.session_state["sim_live_clock"]
 
     st.sidebar._col_pause.button = MagicMock(return_value=True)
-    with pytest.raises(SystemExit):
-        simulate.render()
+    simulate.render()
     assert st.session_state["sim_live_paused"] is True
 
     # Resume press → flag cleared, walk continues from sim_live_clock.
@@ -796,5 +800,5 @@ def test_idle_feed_panel_survives_pause_and_completion(
     assert any("Day complete" in str(c.args[0])
                for c in st.caption.call_args_list)
     assert markdown_calls() == [
-        "\n\n".join(st.session_state["sim_feed"])], \
+        "  \n".join(st.session_state["sim_feed"])], \
         "day-complete rerender must repaint the feed"

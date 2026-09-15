@@ -165,10 +165,11 @@ def _feed_line(chunk: dict) -> str:
 
 
 _LOG_TAIL = 10
-_LOG_VIEWPORT = 160
+_LOG_VIEWPORT = 280          # fits 10 tight rows without inner scrolling
 
 
-def _paint_idle_feed(caption: str | None) -> None:
+def _paint_idle_feed(caption: str | None,
+                     full: bool = False) -> None:
     """THE single event-log surface (bug 2026-09-16 fix).
 
     Plain markdown, painted in every state — before a walk, mid-walk
@@ -178,11 +179,12 @@ def _paint_idle_feed(caption: str | None) -> None:
     Two painters = two looks (the pause "different component"); both
     lanes call only this painter.
 
-    Render-cost cap (bug 2026-09-16, second report): only the LAST
-    ``_LOG_TAIL`` lines paint, inside a fixed-height scroll container —
-    the paint stays constant-size however long the day runs, so it can
-    never starve the board. Full history remains in ``sim_feed``; the
-    count caption tells the user the log is truncated on screen.
+    Render-cost split (tail cap, second report; scrollback restore,
+    third report): WHILE A WALK RUNS the page re-executes per dwell, so
+    the paint is a 10-line tail in a fixed-height scroll container.
+    When the page is NOT self-rerendering (paused / complete / fresh),
+    the full history paints — scrolling back through the whole day
+    costs nothing at that point, and nothing is lost.
     """
     import streamlit as st
 
@@ -191,11 +193,15 @@ def _paint_idle_feed(caption: str | None) -> None:
         st.caption(caption)
     if not feed:
         return
-    tail = feed[-_LOG_TAIL:]
-    if len(feed) > len(tail):
-        st.caption(f"showing last {len(tail)} of {len(feed)} events")
-    with st.container(height=_LOG_VIEWPORT):
-        st.markdown("\n\n".join(tail))
+    shown = feed if full else feed[-_LOG_TAIL:]
+    if len(feed) > len(shown):
+        st.caption(f"showing last {len(shown)} of {len(feed)} events")
+    # full = autosize content height; tail = fixed-height scroll viewport
+    with st.container(height="content" if full else _LOG_VIEWPORT):
+        # two-space line breaks: tight VISUAL rows instead of paragraph
+        # blocks (the "\n\n"-join clipped the viewport to ~4 visible
+        # rows — bug reported 2026-09-16)
+        st.markdown("  \n".join(shown))
 
 
 def _ensure_live_lane(instance_name: str) -> str:
@@ -311,10 +317,11 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         except Exception:
             pass
 
-    # ONE log surface: always painted, no container chrome around it.
+    # ONE log surface: always painted, no container chrome around it —
+    # full history at day end, tail while the walk runs.
     _paint_idle_feed(
         "Day complete. Select a new instance to replay."
-        if terminal else None)
+        if terminal else None, full=terminal)
     if terminal:
         st.session_state["sim_running"] = False
         st.session_state["sim_running_lane"] = None
@@ -431,8 +438,12 @@ def render() -> None:
             st.session_state["sim_running"] = False
             st.session_state["sim_running_lane"] = None
             st.info("Playback paused. Press Resume to continue.")
-            _paint_idle_feed(None)
-            st.stop()
+            # full history while paused (scrollback restored), and the
+            # run must END NORMALLY — st.stop() after painting leaves
+            # THIS run's elements as orphans under the next run's
+            # (double-log bug, user repro 2026-09-16)
+            _paint_idle_feed(None, full=True)
+            return
         if run_pressed:
             # Clear the pause BEFORE any early-stop so the walk resumes
             # from sim_live_clock (same ordering as the scripted lane).
@@ -442,11 +453,9 @@ def render() -> None:
             # paced self-advancement rerender: no press, keep walking
             _render_live(active_lane, llm_client_factory, speed)
         elif live_paused:
-            _paint_idle_feed("Paused — press Resume.")
-            st.stop()
+            _paint_idle_feed("Paused — press Resume.", full=True)
         else:
             _paint_idle_feed("Press Resume to start the live day.")
-            st.stop()
         return
 
     # --- timeline source ---------------------------------------------------
@@ -513,8 +522,10 @@ def render() -> None:
         if pause_pressed:
             st.session_state["sim_paused"] = True
             st.info("Playback paused. Press Resume to continue.")
-            _paint_idle_feed(None)
-            st.stop()
+            # full history; run ends NORMALLY — st.stop() after painting
+            # orphans this run's elements (double-log bug 2026-09-16)
+            _paint_idle_feed(None, full=True)
+            return
     else:
         run_pressed = True
         pause_pressed = False
@@ -567,13 +578,13 @@ def render() -> None:
         # Idle lane: keep the feed visible (paused / completed rerenders).
         feed = st.session_state["sim_feed"]
         if running:
-            _paint_idle_feed("Paused — press Run/Resume.")
+            _paint_idle_feed("Paused — press Run/Resume.", full=True)
         elif finished and feed:
-            _paint_idle_feed("Day complete.")
+            _paint_idle_feed("Day complete.", full=True)
         elif not feed:
             _paint_idle_feed("Press Run to start the scripted day.")
         else:
-            _paint_idle_feed(None)
+            _paint_idle_feed(None, full=True)
         return
 
     active = st.session_state["sim_active_instance"]
@@ -689,9 +700,9 @@ def render() -> None:
             time.sleep(min(_walk_paced_seconds(speed), 2.0))
             st.rerun()
 
-    # ONE log surface: painted after the walk in every pass outcome
-    # (complete / mid-walk).
-    _paint_idle_feed(None)
+    # ONE log surface: painted after the walk in every pass outcome —
+    # full history at day end, tail mid-walk.
+    _paint_idle_feed(None, full=terminal is not None)
     if terminal is not None:
         st.session_state["sim_running"] = False
         st.session_state["sim_last_idx"] = total
