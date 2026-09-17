@@ -87,7 +87,7 @@ def test_log_paints_capped_tail(monkeypatch, request):
     assert len(feed) > 10, "baseline day must exceed the cap for the tail"
 
     simulate._paint_idle_feed(None)
-    md = st.markdown.call_args_list[-1].args[0]
+    md = st.empty.return_value.markdown.call_args_list[-1].args[0]
     # hard line breaks (two-space + newline) = tight 10-row block
     rendered_lines = [ln.rstrip() for ln in md.split("\n")]
     assert st.container.call_args_list[-1].kwargs.get("height") >= 280
@@ -566,15 +566,17 @@ def test_live_pause_holds_walk_state(monkeypatch, request):
     st.sidebar._col_pause.button = MagicMock(return_value=True)
     simulate.render()
     assert st.session_state["sim_live_paused"] is True
-    assert any("Playback paused" in str(c.args[0])
-               for c in st.info.call_args_list)
-    paused_paint = st.markdown.call_args_list[-1].args[0]
+    assert any("Paused" in str(c.args[0])
+               for c in st.empty.return_value.caption.call_args_list), \
+        "pause hint rides in the painter caption slot (tree-stable)"
+    paused_paint = st.empty.return_value.markdown.call_args_list[-1].args[0]
     assert paused_paint.split("\n")[0].rstrip() == feed_after_run[0], \
         "paused paint must start from the day's first event (full log)"
 
     # 3. Paused render (no press): idle hold — clock and feed unchanged.
     st.sidebar._col_pause.button = MagicMock(return_value=False)
-    st.markdown.reset_mock()
+    st.empty.return_value.markdown.reset_mock()
+    st.empty.return_value.caption.reset_mock()
     simulate.render()
     assert st.session_state["sim_feed"] == feed_after_run
     assert st.session_state["sim_live_clock"] == clock_after_run
@@ -710,7 +712,7 @@ def test_scripted_ignores_stale_live_running_flag(
     assert st.session_state["sim_feed"] == []
     assert not st.rerun.called
     assert any("Press Run to start" in str(c.args[0])
-               for c in st.caption.call_args_list)
+               for c in st.empty.return_value.caption.call_args_list)
 
 
 def test_idle_feed_panel_survives_pause_and_completion(
@@ -757,7 +759,8 @@ def test_idle_feed_panel_survives_pause_and_completion(
     st.sidebar.selectbox = MagicMock(return_value="tiny2.json")
 
     def markdown_calls():
-        return [c.args[0] for c in st.markdown.call_args_list]
+        # log content paints through the st.empty() content slot
+        return [c.args[0] for c in st.empty.return_value.markdown.call_args_list]
 
     # 1. Run → event 1 consumed (feed painted inside the status block).
     pressed["run"] = True
@@ -774,12 +777,13 @@ def test_idle_feed_panel_survives_pause_and_completion(
     except SystemExit:
         pass
     assert st.session_state["sim_paused"] is True
-    st.markdown.reset_mock()
+    st.empty.return_value.markdown.reset_mock()
+    st.empty.return_value.caption.reset_mock()
     st.caption.reset_mock()
     pressed["pause"] = False
     sim_page.render()
     assert any("Paused" in str(c.args[0])
-               for c in st.caption.call_args_list)
+               for c in st.empty.return_value.caption.call_args_list)
     assert any(feed_line in m for m in markdown_calls()), \
         "paused render must repaint the feed"
 
@@ -794,11 +798,12 @@ def test_idle_feed_panel_survives_pause_and_completion(
     assert len(st.session_state["sim_feed"]) == 2
 
     # 5. Idle rerender after completion → "Day complete." + full feed.
-    st.markdown.reset_mock()
+    st.empty.return_value.markdown.reset_mock()
+    st.empty.return_value.caption.reset_mock()
     st.caption.reset_mock()
     sim_page.render()
     assert any("Day complete" in str(c.args[0])
-               for c in st.caption.call_args_list)
+               for c in st.empty.return_value.caption.call_args_list)
     assert markdown_calls() == [
         "  \n".join(st.session_state["sim_feed"])], \
         "day-complete rerender must repaint the feed"

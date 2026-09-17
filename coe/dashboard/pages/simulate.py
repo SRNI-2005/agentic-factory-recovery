@@ -172,36 +172,40 @@ def _paint_idle_feed(caption: str | None,
                      full: bool = False) -> None:
     """THE single event-log surface (bug 2026-09-16 fix).
 
-    Plain markdown, painted in every state — before a walk, mid-walk
-    directly on the page body (a st.status is itself a collapsible
-    dropdown whose open/close presentation replays on every rerender,
-    so it must never wrap the log), when paused, and when complete.
-    Two painters = two looks (the pause "different component"); both
-    lanes call only this painter.
+    Plain markdown, painted in every state; both lanes call only this.
 
-    Render-cost split (tail cap, second report; scrollback restore,
-    third report): WHILE A WALK RUNS the page re-executes per dwell, so
-    the paint is a 10-line tail in a fixed-height scroll container.
-    When the page is NOT self-rerendering (paused / complete / fresh),
-    the full history paints — scrolling back through the whole day
-    costs nothing at that point, and nothing is lost.
+    TREE-STABLE paint (double-box bug 2026-09-17): the SAME element
+    sequence is emitted in EVERY state — caption slot, count caption,
+    fixed-height container, content slot — identical element count and
+    identical container height. Only the string CONTENTS differ (tail
+    vs full log; hint text or ""). Conditional elements *above* the box
+    (chat input drawn only mid-walk, info bar only on pause, count
+    caption only when truncated) shifted the box's element path per
+    state, and Streamlit's positional reconcile then left an old copy
+    of the box in the DOM. With a constant tree, every run replaces
+    cleanly.
+
+    Render-cost split: WHILE a walk runs (page re-executes per dwell)
+    the paint is the LAST ``_LOG_TAIL`` lines (constant size, capped);
+    paused / complete / fresh paint the FULL history — scrollback
+    restored, nothing lost.
     """
     import streamlit as st
 
     feed = st.session_state.get("sim_feed") or []
-    if caption:
-        st.caption(caption)
-    if not feed:
-        return
     shown = feed if full else feed[-_LOG_TAIL:]
-    if len(feed) > len(shown):
-        st.caption(f"showing last {len(shown)} of {len(feed)} events")
-    # full = autosize content height; tail = fixed-height scroll viewport
-    with st.container(height="content" if full else _LOG_VIEWPORT):
+    hint = st.empty()
+    hint.caption(caption or "")
+    count = st.empty()
+    count.caption(
+        f"showing last {len(shown)} of {len(feed)} events"
+        + (" — full history" if full else ""))
+    with st.container(height=_LOG_VIEWPORT):
+        box = st.empty()
         # two-space line breaks: tight VISUAL rows instead of paragraph
         # blocks (the "\n\n"-join clipped the viewport to ~4 visible
         # rows — bug reported 2026-09-16)
-        st.markdown("  \n".join(shown))
+        box.markdown("  \n".join(shown) or "no events yet")
 
 
 def _ensure_live_lane(instance_name: str) -> str:
@@ -262,18 +266,8 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     st.session_state["sim_running"] = True
     st.session_state["sim_running_lane"] = "live"
 
-    # §6: the chat input renders ONLY while the walk is live. A typed
-    # submission is queued and the walk reruns; the staged key is the
-    # test seam (see module docstring).
-    staged = st.session_state.pop("sim_chat_text", None)
-    chat = st.chat_input("Describe a disruption to inject mid-flight…",
-                         key="sim_live_chat")
-    # Push BOTH (staged first, then typed) — the queue is a deque with
-    # ordered resolution; never silently drop a typed submission.
-    if staged:
-        st.session_state["sim_interrupt_q"].push(staged)
-    if chat:
-        st.session_state["sim_interrupt_q"].push(chat)
+    # chat capture moved to render()'s live branch (TREE-STABLE: the
+    # input must be present in EVERY state, not only mid-walk).
 
     # No status container at all: a "Simulating day…" st.status is itself
     # a collapsible dropdown that replays open/close presentation on
@@ -399,13 +393,16 @@ def render() -> None:
         llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
 
     if st.session_state["sim_mode"] == "live":
-        # Lane setup ALWAYS runs at mode entry (used to own forking) —
-        # but the WALK itself starts only on a Resume press or a paced
-        # self-advancing rerender of an already-running lane. A fresh
-        # session no longer auto-starts the day (user report 2026-09-15).
+        # TREE-STABLE live lane: the following element sequence is the
+        # SAME in every state — [chat_input][log painter]. No conditional
+        # element may appear above the log (they shift the log's element
+        # path per state and Streamlit's positional reconcile then leaves
+        # a ghost copy of the box — double-log bug 2026-09-16). Status
+        # text rides in the painter's caption slot instead of st.info /
+        # extra st.caption elements.
         if st.session_state["sim_complete"]:
-            st.caption("Day complete. Select a new instance to replay.")
-            _paint_idle_feed(None)
+            _paint_idle_feed("Day complete. Select a new instance to replay.",
+                             full=True)
             return
         active_lane = _ensure_live_lane(instance_name)
 
@@ -431,18 +428,29 @@ def render() -> None:
             or live_paused or speed == "instant"
             or st.session_state["sim_complete"])
 
+        # §6 chat input — ALWAYS the next element after the sidebar
+        # controls, in EVERY state (fresh/paused/running/complete) so the
+        # log box keeps one stable element path. A typed submission is
+        # queued and the walk reruns; the staged key is the test seam.
+        staged = st.session_state.pop("sim_chat_text", None)
+        chat = st.chat_input("Describe a disruption to inject mid-flight…",
+                             key="sim_live_chat")
+        # Push BOTH (staged first, then typed) — the queue is a deque
+        # with ordered resolution; never drop a typed submission.
+        if staged:
+            st.session_state["sim_interrupt_q"].push(staged)
+        if chat:
+            st.session_state["sim_interrupt_q"].push(chat)
+
         if pause_pressed:
             st.session_state["sim_live_paused"] = True
             # a paused lane is no longer walking: clear the flags so a
-            # fresh rerender cannot self-advance while paused
+            # fresh rerender cannot self-advance while paused (and the
+            # run ends NORMALLY — st.stop() after a paint orphans the
+            # tree: double-log bug 2026-09-16)
             st.session_state["sim_running"] = False
             st.session_state["sim_running_lane"] = None
-            st.info("Playback paused. Press Resume to continue.")
-            # full history while paused (scrollback restored), and the
-            # run must END NORMALLY — st.stop() after painting leaves
-            # THIS run's elements as orphans under the next run's
-            # (double-log bug, user repro 2026-09-16)
-            _paint_idle_feed(None, full=True)
+            _paint_idle_feed("Paused — press Resume.", full=True)
             return
         if run_pressed:
             # Clear the pause BEFORE any early-stop so the walk resumes
