@@ -128,14 +128,52 @@ def _render_idle(tl) -> None:
 
 
 def _render_day() -> None:
-    """Big clock + per-event progress + event feed (session-state driven)."""
+    """Clock hero + board + event feed, tree-stable stanza order:
+    [clock slot][gantt slot handled by _paint_board][log stanza]."""
     import streamlit as st
 
     clock = st.session_state.get("sim_clock", 0)
-    st.metric("Day clock", f"{clock} min")
+    slot = st.empty()
+    slot.metric("Day clock", f"{clock} min")
 
-    total = max(st.session_state.get("sim_total", 1), 1)
-    st.progress(min(st.session_state["sim_last_idx"] / total, 1.0))
+
+def _jobs_palette(active: str) -> dict[str, str]:
+    """One colour per JOB (same convention as the Configure page)."""
+    # stable hash → hue within the dashboard palette set used before
+    palette_ids = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd",
+                   "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
+                   "#17becf", "#aec7e8", "#ffbb78", "#98df8a",
+                   "#ff9896", "#c5b0d5", "#c5b0d5", "#c49c94"]
+    out: dict[str, str] = {}
+    for i, job in enumerate(sorted({e["job_name"]
+                                    for e in _fetch_active_entries(active)})):
+        out[job] = palette_ids[i % len(palette_ids)]
+    return out
+
+
+_STUB_BOARD_JOBS_COLORS = {}    # (instance, job_name) → hex; populated lazily
+
+
+def _paint_board(active: str, t: int) -> None:
+    """[clock][gantt] — tree-stable board stanza (spec §3).
+
+    Emits the SAME two-slot sequence in every state: one st.empty
+    caption for the clock hero, then ONE st.plotly_chart. The chart
+    repaints per pass at its constant path (spec §4.3 amended);
+    between boundaries only the bar colours/state arrays change.
+    """
+    import streamlit as st
+
+    from coe.dashboard.gantt import build_board_figure
+
+    entries = _fetch_active_entries(active)
+    clock = st.empty()
+    clock.caption(f"t = {int(t):>4} min")
+    fig = build_board_figure(entries, int(t), _jobs_palette(active))
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.empty()          # keep the gantt slot in the tree
 
 
 def _walk_paced_seconds(speed) -> float:
@@ -433,6 +471,7 @@ def render() -> None:
         # log box keeps one stable element path. A typed submission is
         # queued and the walk reruns; the staged key is the test seam.
         staged = st.session_state.pop("sim_chat_text", None)
+        _paint_board(active_lane, st.session_state["sim_live_clock"])
         chat = st.chat_input("Describe a disruption to inject mid-flight…",
                              key="sim_live_chat")
         # Push BOTH (staged first, then typed) — the queue is a deque
@@ -576,6 +615,9 @@ def render() -> None:
 
     _render_idle(tl)
     _render_day()
+    if st.session_state.get("sim_active_instance"):
+        _paint_board(st.session_state["sim_active_instance"],
+                     st.session_state.get("sim_clock", 0))
 
     # Recompute AFTER the start_run block: a fresh Run press just set
     # sim_running/sim_running_lane above.

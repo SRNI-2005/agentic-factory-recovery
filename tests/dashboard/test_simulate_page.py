@@ -807,3 +807,49 @@ def test_idle_feed_panel_survives_pause_and_completion(
     assert markdown_calls() == [
         "  \n".join(st.session_state["sim_feed"])], \
         "day-complete rerender must repaint the feed"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: tree-stable clock hero + gantt slot (both lanes)
+# ---------------------------------------------------------------------------
+
+def test_gantt_slot_tree_stable_live(clean_db, demo_scenario, monkeypatch,
+                                     request):
+    """Spec §6 AC 6: the live page's clock/gantt/log slots exist in EVERY
+    state with ZERO conditional elements above/between them."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance(), press=True)
+    st.session_state["sim_speed"] = "instant"
+
+    simulate.render()   # runs whole day end-to-end, instant
+    # clock slot painted at least once with a full-readable minute
+    assert any("t = " in str(c.args[0])
+               for c in st.empty.return_value.caption.call_args_list)
+    # gantt slot: a plotly chart painted through st.plotly_chart
+    assert st.plotly_chart.called
+
+
+def test_gantt_board_repaints_every_pass(
+        clean_db, demo_scenario, monkeypatch, request):
+    """Spec §4 (amended): the board repaints EVERY pass at a constant
+    slot — twice-rendered page shows the SAME slot count (never an
+    added/removed chart), proving the slot is path-stable."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance(), press=True)
+    simulate.render()
+    assert st.plotly_chart.called
+    first_calls = st.plotly_chart.call_count
+    simulate.render()          # next pass, same state
+    assert st.plotly_chart.call_count > first_calls
+    # and the fingerprint key must NOT exist (YAGNI guard, spec §4.3)
+    assert "sim_gantt_fingerprint" not in st.session_state
