@@ -340,6 +340,14 @@ Two modes over one controller:
   reproducible benchmark lane; `auto_recover` default true decides
   whether structured events self-solve).
 
+The Simulate page now also plays the board itself: a machines × time
+Gantt of the actually-committed schedule sits under the day clock —
+completed work dims behind the moving marker, in-progress ops draw an
+amber border, jobs keep their per-job colours, and after every recovery
+the schedule ahead of the frozen clock re-lays from the new version. At
+day end the final board stays and the schedule-transition diff
+(baseline → final) appears below it.
+
 > Live-day runs are demo-grade (typed interruptions drive t — non-
 > deterministic by design); the publication benchmark uses the scripted
 > lane.
