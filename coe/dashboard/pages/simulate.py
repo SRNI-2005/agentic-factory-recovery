@@ -351,6 +351,9 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
 
     # ONE log surface: always painted, no container chrome around it —
     # full history at day end, tail while the walk runs.
+    if terminal:
+        # refresh the board ONE more time from the final active version
+        _paint_board(active, st.session_state["sim_live_clock"])
     _paint_idle_feed(
         "Day complete. Select a new instance to replay."
         if terminal else None, full=terminal)
@@ -439,6 +442,14 @@ def render() -> None:
         # text rides in the painter's caption slot instead of st.info /
         # extra st.caption elements.
         if st.session_state["sim_complete"]:
+            # board persists on completed rerenders too (option A gap
+            # fix: the early return used to skip the gantt slot, so the
+            # board vanished the moment sim_complete flipped) — the
+            # lane still names the played clone, so the final figure
+            # repaints at its constant [clock][gantt] path; board → log
+            # order stays deterministic.
+            _paint_board(st.session_state["sim_live_active"],
+                         st.session_state["sim_live_clock"])
             _paint_idle_feed("Day complete. Select a new instance to replay.",
                              full=True)
             return

@@ -853,3 +853,39 @@ def test_gantt_board_repaints_every_pass(
     assert st.plotly_chart.call_count > first_calls
     # and the fingerprint key must NOT exist (YAGNI guard, spec §4.3)
     assert "sim_gantt_fingerprint" not in st.session_state
+
+
+# ---------------------------------------------------------------------------
+# Task 3: option A — final board persists at day end (+ diff below)
+# ---------------------------------------------------------------------------
+
+def test_day_end_final_board_stays_with_diff_below(
+        clean_db, demo_scenario, monkeypatch, request):
+    """Spec §8 AC 4 (option A): at day end the chart slot keeps its
+    position (gantt painted) and _render_diff runs below."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance(), press=True)
+    st.session_state["sim_speed"] = "instant"
+
+    simulate.render()
+    assert st.session_state["sim_complete"] is True
+    # board painted (final figure at the SAME stable path — no removal
+    # needed) alongside the diff
+    assert st.plotly_chart.called
+    # and _render_diff's own chart call happened
+    assert st.plotly_chart.call_count >= 1
+    # the DAY-END pass repaints the board itself (pre-walk paint + a
+    # terminal refresh from the final active version)
+    assert st.plotly_chart.call_count >= 2
+
+    # completed-state rerender: the board must STILL be painted above
+    # the full log (the early return used to skip the board entirely —
+    # on a completed rerender the board vanished)
+    st.plotly_chart.reset_mock()
+    simulate.render()
+    assert st.plotly_chart.called
