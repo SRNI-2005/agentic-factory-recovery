@@ -889,3 +889,26 @@ def test_day_end_final_board_stays_with_diff_below(
     st.plotly_chart.reset_mock()
     simulate.render()
     assert st.plotly_chart.called
+
+
+def test_live_day_end_diff_below_final_board(
+        clean_db, demo_scenario, monkeypatch, request):
+    """Spec (live-day diff, 2026-09-18 review): at live-day end the
+    before→final diff renders below the final board, just like the
+    scripted lane."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+    _seed_live_session(st, _baseline_instance(), press=True)
+    st.session_state["sim_speed"] = "instant"
+
+    simulate.render()   # runs whole day end-to-end, instant
+    assert st.session_state["sim_complete"] is True
+    # before-capture captured at lane entry (fork of committed baseline)
+    assert st.session_state["sim_live_before_entries"]
+    # terminal pass: board repaint + the diff chart (end-to-end
+    # _render_diff, no monkeypatch of the seam)
+    assert st.plotly_chart.call_count >= 2

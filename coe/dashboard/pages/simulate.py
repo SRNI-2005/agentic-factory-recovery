@@ -280,6 +280,8 @@ def _ensure_live_lane(instance_name: str) -> str:
             st.error(str(exc))
             st.stop()
         st.session_state["sim_live_active"] = active
+        st.session_state["sim_live_before_entries"] = \
+            _fetch_active_entries(active)
     return st.session_state["sim_live_active"]
 
 
@@ -354,6 +356,9 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     if terminal:
         # refresh the board ONE more time from the final active version
         _paint_board(active, st.session_state["sim_live_clock"])
+        if st.session_state.get("sim_live_before_entries"):
+            _render_diff(active,
+                         st.session_state["sim_live_before_entries"])
     _paint_idle_feed(
         "Day complete. Select a new instance to replay."
         if terminal else None, full=terminal)
