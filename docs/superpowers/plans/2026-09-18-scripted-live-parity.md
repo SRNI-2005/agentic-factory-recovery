@@ -95,7 +95,9 @@ class DisplayClock:
         if self._speed == "instant":
             self.prev_t = self._target
             return self.prev_t
-        wall_seconds = (gap / max(int(self._speed), 1)) * 60.0
+        # pace law (pinned by the plan's tests): N = display-minutes per wall-second —
+    # "30x" plays a 90-min gap in ~3.0 wall-seconds (90/30)
+    wall_seconds = max(gap, 1) / max(int(self._speed), 1)
         elapsed = max(now - self._armed_at, 0.0)
         self.prev_t = min(self._target, int(self.prev_t + gap * (elapsed / wall_seconds)))
         return self.prev_t
