@@ -369,6 +369,10 @@ def test_paced_no_duplicate_lines_across_rerenders(
 
     # 1. Run → the narrative step is entered inline: the rerender shows
     #    the ⏳ line, then the terminator (recovery chunk) advances idx.
+    # Deviation (Task 2 sweep, spec §10.1): with a baseline present the
+    # run-press pass sweeps the display toward the authored minute and
+    # the terminator is consumed on the NEXT pass — so render twice.
+    simulate.render()
     simulate.render()
     assert st.session_state["sim_last_idx"] == 1
     assert len(_recovery_start_lines()) == 1
@@ -724,8 +728,9 @@ def _scripted_pace_env(monkeypatch, script_path):
     real_load = tlmod.load_timeline
     monkeypatch.setattr(
         tlmod, "load_timeline",
-        lambda p: real_load(script_path) if "tiny2.json" in str(p)
-        else real_load(p))
+        lambda p: (
+            real_load(script_path) if pathlib.Path(str(p)).name
+            == fake_script.name else real_load(p)))
 
 
 def _stub_render_env(monkeypatch, st):
@@ -1051,3 +1056,85 @@ def test_display_clock_instant_jumps():
     c.prev_t = 0
     c.arm(target_t=90)
     assert c.advance(now=0.001) == 90
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (scripted live-parity): display-clock pacing + makespan terminus
+# ---------------------------------------------------------------------------
+
+def test_scripted_paces_between_events(
+        clean_db, demo_scenario, tmp_path, monkeypatch, request):
+    """Spec §10 AC 8: paced scripted sweep interpolates the display
+    clock across event gaps instead of teleporting; recovers at the
+    authored minute."""
+    _live_pace_env(monkeypatch, request)
+    script = json.dumps({
+        "name": "parity", "seed": 1, "horizon_days": 2,
+        "auto_recover": False,
+        "events": [{"t": 90, "kind": "MACHINE", "event_type": "FAILURE",
+                    "machine_id": "M3"},
+                   {"t": 300, "kind": "MACHINE", "event_type": "FAILURE",
+                    "machine_id": "M3"}],
+    })
+    p = tmp_path / "parity.json"; p.write_text(script)
+    _scripted_pace_env(monkeypatch, str(p))
+    st = _make_st(); sim_page = _stub_render_env(monkeypatch, st)
+    # a baseline-bearing instance is required for the sweep: with no
+    # active schedule the board horizon is 0 and pacing is undefined
+    st.session_state["instance"] = _baseline_instance()
+    # pause NOT pressed (a bare MagicMock call is truthy and would pause
+    # the lane inside the button-driven tests)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+    st.session_state["sim_speed"] = 30
+    st.sidebar.selectbox = MagicMock(return_value="parity.json")
+    col = st.sidebar._col_run
+    pressed = {"run": True}; col.button = lambda label, **k: pressed["run"]
+    sim_page.render()          # pass 1: arms sweep toward 90
+    assert 0 < st.session_state["sim_display_t"] < 90, (
+        "pass must advance interpolation beyond 0 without reaching the "
+        "event minute")
+    # pass 2..n until sweep arrives at 90, then the engine consumes the
+    # event: after several passes the ingest completes.
+    for _ in range(3):
+        sim_page.render()
+    assert st.session_state["sim_last_idx"] == 1   # event 1 consumed
+
+
+def test_scripted_day_ends_at_board_horizon(
+        clean_db, demo_scenario, tmp_path, monkeypatch, request):
+    """Spec §10.1: after consuming ALL authored events, the sweep keeps
+    going to the final active version's makespan; the terminal rail cites
+    that day-end clock (NOT the last ingest's 300)."""
+    _live_pace_env(monkeypatch, request)
+    script = tmp_path / "horizon.json"
+    script.write_text(json.dumps({
+        "name": "horizon", "seed": 1, "horizon_days": 2,
+        "auto_recover": False,
+        "events": [{"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+                    "machine_id": "M3"},
+                   {"t": 300, "kind": "MACHINE", "event_type": "FAILURE",
+                    "machine_id": "M3"}]}))
+    _scripted_pace_env(monkeypatch, str(script))
+    st = _make_st(); sim_page = _stub_render_env(monkeypatch, st)
+    st.session_state["instance"] = _baseline_instance()
+    # pause NOT pressed (a bare MagicMock call is truthy and would pause
+    # the lane inside the button-driven tests)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+    st.session_state["sim_speed"] = 60
+    st.sidebar.selectbox = MagicMock(return_value="horizon.json")
+    pressed = {"run": True}
+    st.sidebar._col_run.button = (
+        lambda label, **k: pressed["run"])
+    # sweep passes (display-only) + terminator consumption until done:
+    for _ in range(400):            # 406-min day at 60x = ~7s of passes
+        try:
+            sim_page.render()
+        except SystemExit:          # spare SleepCap exceptions in bare
+            pass
+        pressed["run"] = False      # only the very first pass presses Run
+        if st.session_state.get("sim_running") is False:
+            break
+    assert st.session_state["sim_last_idx"] == 2    # both events consumed
+    assert st.session_state["sim_display_t"] > 300  # swept PAST the last
+    # and the day never terminates before the display clock passes the
+    # final ingest's clock (no stranding future ops at day end).

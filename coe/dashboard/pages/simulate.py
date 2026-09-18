@@ -668,6 +668,8 @@ def render() -> None:
             st.session_state["sim_active_instance"] = active
             st.session_state["sim_last_idx"] = 0
             st.session_state["sim_clock"] = 0
+            st.session_state["sim_display_t"] = 0
+            st.session_state.pop("sim_display", None)
             st.session_state["sim_feed_scripted"] = []
             st.session_state["sim_seen"] = set()   # a second day repaints
             st.session_state["sim_before_entries"] = \
@@ -678,8 +680,10 @@ def render() -> None:
     _render_idle(tl)
     _render_day()
     if st.session_state.get("sim_active_instance"):
-        _paint_board(st.session_state["sim_active_instance"],
-                     st.session_state.get("sim_clock", 0))
+        _paint_board(
+            st.session_state["sim_active_instance"],
+            st.session_state.get(
+                "sim_display_t", st.session_state.get("sim_clock", 0)))
 
     # Recompute AFTER the start_run block: a fresh Run press just set
     # sim_running/sim_running_lane above.
@@ -733,6 +737,7 @@ def render() -> None:
                 continue
             st.session_state["sim_last_idx"] = chunk["idx"] + 1
             st.session_state["sim_clock"] = chunk["t"]
+            st.session_state["sim_display_t"] = chunk["t"]
             key = (chunk.get("t"), chunk.get("event"))
             if key not in st.session_state["sim_seen"]:
                 st.session_state["sim_seen"].add(key)
@@ -748,7 +753,45 @@ def render() -> None:
                         f"{chunk.get('kind', '')}".rstrip())
 
     else:
-        # Paced mode: ONE full terminator per auto-rerender,
+        # Paced mode: the DISPLAY clock sweeps (DisplayClock, Task 1)
+        # toward the next authored event minute (or the board horizon);
+        # each pass advances the display proportionally to the dwell and
+        # repaints the board at the interpolated minute. Terminators
+        # (event chunks) are only consumed once the display HAS reached
+        # the authored minute — events no longer teleport the board.
+        # The chunk-consumption loop below keeps today's semantics
+        # exactly (recovery_start/recovery inline-block, sim_last_idx,
+        # dedup, lane feed, tree-stable paints); `_walk_paced_seconds`
+        # stays the RERENDER CADENCE cap, unchanged.
+        import time
+
+        entries = _fetch_active_entries(active)
+        makespan = max((int(e["end_time"]) for e in entries), default=0)
+        authored = [int(ev.t) for ev in tl.events]
+        last_idx = st.session_state["sim_last_idx"]
+        upcoming = (authored[last_idx] if last_idx < len(authored)
+                    else makespan)
+        sweep_target = min(upcoming, makespan)
+        display = st.session_state.setdefault(
+            "sim_display", DisplayClock(speed=speed))
+        display.prev_t = st.session_state.get("sim_display_t", 0)
+        dwell = min(_walk_paced_seconds(speed), 2.0)
+        now = time.monotonic()
+        display.arm(sweep_target, now)
+        disp_t = display.advance(now + dwell)   # interpolate THIS pass
+        st.session_state["sim_display_t"] = disp_t
+
+        if disp_t < sweep_target:
+            # Sweep pass: board paint at the interpolated minute only —
+            # the terminator waits until the display is AT the authored
+            # event minute (or the horizon).
+            _paint_board(active, disp_t)
+            _paint_idle_feed("scripted", None)
+            time.sleep(dwell)
+            st.rerun()
+            return
+
+        # Paced mode paths ONE full terminator per auto-rerender,
         # st.rerun() self-advancement. A fresh generator is created
         # on every rerender; the engine skips idx < start_index
         # (already persisted) and runs silently instant — the page
@@ -777,6 +820,9 @@ def render() -> None:
                         break
                     continue
                 st.session_state["sim_seen"].add(key)
+                # sim_clock advances to EVERY chunk's authored t —
+                # recovery chunks too (closes the 330-freeze).
+                st.session_state["sim_clock"] = chunk["t"]
                 if chunk["event"] == "recovery":
                     status = chunk.get("status", "?")
                     mark = ("✓ COMMITTED" if status == "COMMITTED"
@@ -784,6 +830,9 @@ def render() -> None:
                     line = (f"[t={chunk['t']:>4}] recovery "
                             f"{chunk.get('kind', '')} — {mark}")
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
+                    # terminator consumption: the sweep re-arms from
+                    # the authored minute (display jumps to the event).
+                    st.session_state["sim_display_t"] = chunk["t"]
                 elif chunk["event"] == "recovery_start":
                     who = ("live LLM" if chunk.get("live")
                            else "auto-fix (no LLM)")
@@ -795,7 +844,7 @@ def render() -> None:
                     line = (f"[t={chunk['t']:>4}] {chunk['event']} "
                             f"{chunk.get('kind', '')}".rstrip())
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                    st.session_state["sim_clock"] = chunk["t"]
+                    st.session_state["sim_display_t"] = chunk["t"]
                 st.session_state["sim_feed_scripted"].append(line)
                 if chunk["event"] == "recovery_start":
                     _paint_idle_feed("scripted", None)   # paint BEFORE the solve
@@ -829,6 +878,12 @@ def render() -> None:
         else:
             st.info("Day finished — structured events absorbed "
                     "without a recovery solve.")
-        st.caption(_rail_line(active, st.session_state["sim_clock"]))
+        # Day-end clock: the display may have swept PAST the last
+        # ingest (makespan terminus, spec §10.1) — the rail cites the
+        # day-end clock, not the final ingest's t.
+        display_t = st.session_state.get("sim_display_t", 0)
+        end_clock = max(st.session_state["sim_clock"], display_t)
+        st.session_state["sim_display_t"] = end_clock
+        st.caption(_rail_line(active, end_clock))
         if before_entries:
             _render_diff(active, before_entries)
