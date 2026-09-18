@@ -179,3 +179,33 @@ module).
 6. Tree-stable page invariant test green (no conditional elements in
    the clock/gantt/log sequence in any state).
 7. Quick gate (`pytest -m "not mqtt and not slow"`) green.
+
+## 9. Amendment A1 (2026-09-18, user-ruled): pacing, unified log, day-end diff pair
+
+Normative after the accepted-spec review round; answers user observations
+on the scripted lane's post-launch behavior.
+
+1. **The clock follows the events, not the last ingest** — a scripted
+   event at t=380 (NARRATIVE/recovery included) updates the page clock
+   even though the chunk kind is `recovery`; the walk's sim_clock must
+   equal the last event's authored time at terminus (the t=330 freeze is
+   a defect, not semantics).
+2. **Pacing is user speed, always**: between two authored events the
+   board's clock interpolates across the event gap at the chosen speed
+   (dwell seconds = gap_minutes / N; instant = jump). Event/recovery
+   increments only happen on the EVENT chunks (clock "pauses" while a
+   solve runs — same mid-flight contract as the live lane). Page-level
+   only; the engine walk stays byte-reproducible (A spec §3b) — the
+   pacing is performed on page-level state keys, no engine change.
+3. **Unified log schema across both lanes** (YAGNI the two formats):
+   every log line is
+   `[t=…<4] done=N running=M · <detail>`
+   where done/running come from the committed entries classified at t
+   (same classification as the board). Live completion ticks drop the
+   old "tick" word (their detail was the numbers themselves); scripted
+   ingest/recovery/⏳ lines keep their detail text and gain the state
+   numbers. The log painter, dedup keys, lane-scoped feeds (2026-09-16
+   fixes) are unchanged.
+4. **Schedule transition shows initial AND final**: `_render_diff`
+   renders the before frame FIRST and the final frame SECOND (two charts)
+   — the deltas visible side-by-side.
