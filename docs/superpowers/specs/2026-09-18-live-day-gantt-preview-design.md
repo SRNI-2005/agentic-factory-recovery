@@ -209,3 +209,65 @@ on the scripted lane's post-launch behavior.
 4. **Schedule transition shows initial AND final**: `_render_diff`
    renders the before frame FIRST and the final frame SECOND (two charts)
    — the deltas visible side-by-side.
+
+## 10. Amendment A2 (2026-09-18, user-ruled): scripted replay =
+## live-day parity on the page
+
+Supersedes §9.2 (event-gap interpolation). The user's ruling: "scripted
+replay must have the same exact behaviour that live day already has"
+(+ keep the richer event/disruption log). Normative definition of the
+contract, effective on both lanes' REP4302K wiring:
+
+### 10.1 Behavior contract (scripted lane adopts live-day semantics)
+
+- **Display owns the clock.** The walk engine's chunk stream is
+  unchanged (byte-reproducible lane, deterministic commit chain, §3b);
+  the PAGE owns a display clock that sweeps 0 → **makespan of the
+  played board** (not the last event time), at the user's speed:
+  dwell seconds = boundary_gap / N, instant = jump. One terminator per
+  rerender dwell — same controller shape as the live paced lane.
+- **Authored events pause the clock mid-flight**: when the display
+  clock crosses an authored event minute (fails machine, material,
+  worker, narrative), the sweep pauses, the engine consumes/ingests the
+  event, logs, and (auto_recover on) the solve runs; the ⏳ line paints
+  the moment the solve begins (commit aa6bd98 semantics); the new
+  version commits, the board after t re-lays, and the sweep continues
+  from the same display minute. Clock does not rewind (§4 existing).
+- **Day end = board horizon, not last event**: after the last authored
+  event's solve commits, the clock keeps sweeping to the final active
+  version's makespan; every op dims behind the marker; then day_end
+  (the t=330/380 stale-clock freeze — the pending-jobs-near-400 defect —
+  dies by construction).
+- **Log unification (upgrades §9.3)**: both lanes emit
+  `[t=<4width>] done=N running=M · <detail>`
+  where done/running are derived from the SAME committed-entry
+  classification the board uses (pure, read-only). Live tick lines lose
+  the word "tick" (the state numbers ARE the tick's detail); scripted
+  ingest/recovery/⏳ lines keep their detail text and add the numbers.
+- **Terminus rail line** cites the day-end clock (the walker's
+  `rail_line` at the makespan sweep end), not the last ingest time.
+
+### 10.2 Unchanged by this amendment
+
+- `walk_timeline` (engine chunk stream, commit chain, seeds) — untouched.
+- `live_day` and the live lane controller — already the reference shape;
+  the scripted page arm migrates to the same display mechanics (board
+  classify at display-t, one board+log paint per pass, pause/resume
+  semantics).
+- The scripted lane's resume (`sim_last_idx`) and idempotent re-run
+  behavior — untouched.
+- Timeline-lane determinism pins (`test_replay_idempotent_and_
+  deterministic`): log-format change (§10.3) is page-side; the engine
+  chunk stream (and therefore the commit-chain determinism assert) is
+  untouched.
+
+### 10.3 Acceptance (amend)
+
+8. Scripted replay at N× paces the board clock continuously between
+   authored events AND sweeps out to the board horizon after the last
+   event; instant jumps boundary-to-boundary. Clock never teleports
+   (no ≥gap jumps at non-instant speeds) and never freezes behind the
+   board (no ops stranded future-of the marker at day end).
+9. Lanes emit the same log schema; any run's log in scripted lane
+   contains the same event/recovery detail as before the amendment
+   (unified format) and byte-identical replay remains green.
