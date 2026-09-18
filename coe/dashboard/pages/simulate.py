@@ -216,22 +216,55 @@ class DisplayClock:
         return self.prev_t
 
 
-def _feed_line(chunk: dict) -> str:
+def _board_state_line(instance: str, t: int, detail: str) -> str:
+    """Unified log schema (spec §10): ``[t=<4>] done=N running=M · detail``.
+
+    done/running come from the SAME entry classification the board
+    paints (``classify`` over ``_fetch_active_entries``, read-only); a
+    per-pass session memo keyed by (instance, t) caps the helper at ONE
+    query per pass (memo is reset each render pass in ``render()``).
+    """
+    import streamlit as st
+
+    from coe.dashboard.gantt import classify
+
+    memo = st.session_state.setdefault("sim_state_memo", {})
+    key = (instance, int(t))
+    if key not in memo:
+        memo[key] = classify(_fetch_active_entries(instance), int(t))
+    cls = memo[key]
+    prefix = (f"[t={int(t):>4}] done={len(cls['completed'])} "
+              f"running={len(cls['in_progress'])}")
+    detail = (detail or "").strip()
+    return f"{prefix} · {detail}" if detail else prefix
+
+
+def _feed_line(chunk: dict, instance: str | None = None) -> str:
+    """Lane feed line. WITH an instance (all live/append sites route
+    through it) every line carries the board's done/running numbers
+    (spec §10 unified schema); tick lines drop the word "tick" — the
+    state numbers ARE the detail."""
     ev = chunk.get("event", "?")
     t = chunk.get("t", "—")
     if ev == "tick":
+        if instance is not None:
+            return _board_state_line(instance, t, "")
         return (f"[t={t:>4}] tick — done={chunk.get('completed', '?')} "
                 f"running={chunk.get('in_progress', '?')}")
     if ev == "recovery_start":
         who = "live LLM" if chunk.get("live") else "auto-fix (no LLM)"
-        return f"[t={t:>4}] ⏳ recovery starting ({who}) — solving…"
-    if ev == "recovery":
+        detail = f"⏳ recovery starting ({who}) — solving…"
+    elif ev == "recovery":
         status = chunk.get("status", "?")
         mark = ("✓ COMMITTED" if status == "COMMITTED" else f"✗ {status}")
-        return f"[t={t:>4}] recovery NARRATIVE — {mark}"
-    if ev == "day_end":
-        return f"[t={t:>4}] day_end"
-    return f"[t={t:>4}] {ev}"
+        detail = f"recovery NARRATIVE — {mark}"
+    elif ev == "day_end":
+        detail = "day_end"
+    else:
+        detail = str(ev)
+    if instance is None:
+        return f"[t={t:>4}] {detail}"
+    return _board_state_line(instance, t, detail)
 
 
 _LOG_TAIL = 10
@@ -359,7 +392,12 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         if key in st.session_state["sim_seen"]:
             return
         st.session_state["sim_seen"].add(key)
-        st.session_state["sim_feed_live"].append(_feed_line(chunk))
+        st.session_state["sim_feed_live"].append(_feed_line(chunk, active))
+        if (chunk.get("event") == "recovery"
+                and chunk.get("status") == "COMMITTED"):
+            # the board changed — the (instance, t) memo must not feed
+            # later lines in this pass the pre-commit state
+            st.session_state["sim_state_memo"] = {}
         st.session_state["sim_live_clock"] = chunk["t"]
 
     terminal = False
@@ -443,6 +481,10 @@ def render() -> None:
         ("sim_live_paused", False), ("sim_complete", False),
     ):
         st.session_state.setdefault(key, default)
+
+    # §10 state-line memo: reset per render PASS so committed versions
+    # repaint fresh numbers next pass (one query per pass, not per day)
+    st.session_state["sim_state_memo"] = {}
 
     # --- mode picker (before the timeline pickers; spec §6) ---------------
     # No widget key: the radio re-seeds from the persisted sim_mode each
@@ -729,9 +771,11 @@ def render() -> None:
                     continue
                 st.session_state["sim_seen"].add(key)
                 st.session_state["sim_feed_scripted"].append(
-                    f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                    f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
-                    " this takes minutes (translate + solver floor)…")
+                    _board_state_line(
+                        active, chunk["t"],
+                        f"⏳ recovery starting "
+                        f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
+                        " this takes minutes (translate + solver floor)…"))
                 _paint_idle_feed("scripted", None)   # paint BEFORE the solve
 
                 continue
@@ -745,12 +789,18 @@ def render() -> None:
                     status = chunk.get("status", "?")
                     mark = "✓" if status == "COMMITTED" else f"✗ {status}"
                     st.session_state["sim_feed_scripted"].append(
-                        f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
-                        f"{mark}")
+                        _board_state_line(
+                            active, chunk["t"],
+                            f"recovery {chunk['kind']} — "
+                            f"{mark}"))
+                    if status == "COMMITTED":
+                        st.session_state["sim_state_memo"] = {}
                 else:
                     st.session_state["sim_feed_scripted"].append(
-                        f"[t={chunk['t']:>4}] {chunk['event']} "
-                        f"{chunk.get('kind', '')}".rstrip())
+                        _board_state_line(
+                            active, chunk["t"],
+                            f"{chunk['event']} "
+                            f"{chunk.get('kind', '')}".rstrip()))
 
     else:
         # Paced mode: the DISPLAY clock sweeps (DisplayClock, Task 1)
@@ -827,8 +877,11 @@ def render() -> None:
                     status = chunk.get("status", "?")
                     mark = ("✓ COMMITTED" if status == "COMMITTED"
                             else f"✗ {status}")
-                    line = (f"[t={chunk['t']:>4}] recovery "
-                            f"{chunk.get('kind', '')} — {mark}")
+                    line = _board_state_line(
+                        active, chunk["t"],
+                        f"recovery {chunk.get('kind', '')} — {mark}")
+                    if status == "COMMITTED":
+                        st.session_state["sim_state_memo"] = {}
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
                     # terminator consumption: the sweep re-arms from
                     # the authored minute (display jumps to the event).
@@ -836,13 +889,17 @@ def render() -> None:
                 elif chunk["event"] == "recovery_start":
                     who = ("live LLM" if chunk.get("live")
                            else "auto-fix (no LLM)")
-                    line = (f"[t={chunk['t']:>4}] ⏳ recovery starting "
-                            f"({who}) — solving…")
+                    line = _board_state_line(
+                        active, chunk["t"],
+                        f"⏳ recovery starting ({who}) — solving…")
                 elif chunk["event"] == "auto_recover":
-                    line = f"[t={chunk['t']:>4}] auto_recover"
+                    line = _board_state_line(active, chunk["t"],
+                                             "auto_recover")
                 else:
-                    line = (f"[t={chunk['t']:>4}] {chunk['event']} "
-                            f"{chunk.get('kind', '')}".rstrip())
+                    line = _board_state_line(
+                        active, chunk["t"],
+                        f"{chunk['event']} "
+                        f"{chunk.get('kind', '')}".rstrip())
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
                     st.session_state["sim_display_t"] = chunk["t"]
                 st.session_state["sim_feed_scripted"].append(line)

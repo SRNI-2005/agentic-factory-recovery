@@ -9,6 +9,7 @@ component.
 """
 import json
 import pathlib
+import re
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -1138,3 +1139,75 @@ def test_scripted_day_ends_at_board_horizon(
     assert st.session_state["sim_display_t"] > 300  # swept PAST the last
     # and the day never terminates before the display clock passes the
     # final ingest's clock (no stranding future ops at day end).
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (scripted live-parity): unified log schema — done/running on
+# every line, both lanes
+# ---------------------------------------------------------------------------
+
+_UNIFIED_SCHEMA = re.compile(
+    r"\[t=\s*\d+\] done=\d+ running=\d+(?: · .*)?$")
+
+
+def test_unified_log_schema_both_lanes(clean_db, demo_scenario,
+                                        tmp_path, monkeypatch, request):
+    """Spec §10 log unification: live tick lines and scripted detail
+    lines both carry 'done=N running=M · <detail>', computed by the SAME
+    entry classification the board uses (classify over
+    _fetch_active_entries, read-only)."""
+    _live_pace_env(monkeypatch, request)
+    st = _live_st()
+    from coe.dashboard.pages import simulate
+
+    monkeypatch.setitem(sys.modules, "streamlit.errors", _errors_mod())
+    monkeypatch.setitem(sys.modules, "streamlit", st)
+
+    # --- live lane: whole instant day -------------------------------------
+    _seed_live_session(st, _baseline_instance(), press=True)
+    st.session_state["sim_speed"] = "instant"
+
+    simulate.render()
+    feed = st.session_state["sim_feed_live"]
+    lines = [ln for ln in feed if ln.strip()]
+    assert lines, "live day must log something"
+    for ln in lines:
+        assert _UNIFIED_SCHEMA.match(ln), \
+            f"live line lacks state numbers: {ln!r}"
+    # tick lines drop the word "tick" — the state numbers ARE the detail
+    assert not any("tick" in ln for ln in lines)
+
+    # --- scripted lane: instant terminal pass with a recovery -------------
+    # NARRATIVE event (auto_recover=False): the recovery_start line and
+    # the COMMITTED recovery line must carry state numbers too.
+    import coe.agents.graph as graph_mod
+
+    monkeypatch.setattr(
+        graph_mod, "execute_recovery",
+        lambda *a, **kw: {"status": "COMMITTED",
+                          "state": types.SimpleNamespace(
+                              committed_version_id=None)})
+    script = tmp_path / "unified.json"
+    script.write_text(json.dumps({
+        "name": "unified", "seed": 1, "horizon_days": 1,
+        "auto_recover": False,
+        "events": [{"t": 100, "kind": "NARRATIVE",
+                    "text": "M3 gearbox seized, sparks everywhere",
+                    "severity": "HIGH"}]}))
+    st.sidebar.radio = MagicMock(return_value="Scripted replay")
+    st.session_state["sim_mode"] = "scripted"
+    st.session_state["sim_script"] = str(script)
+    st.session_state["sim_speed"] = "instant"
+
+    simulate.render()   # manual-entry seam: runs to terminal in one pass
+    assert st.session_state.get("sim_last_idx") >= 1
+    scripted_lines = [ln for ln in st.session_state["sim_feed_scripted"]
+                      if ln.strip()]
+    assert scripted_lines
+    joined = "\n".join(scripted_lines)
+    # NARRATIVE steps log the recovery pair only (no structured ingest)
+    assert "recovery starting" in joined
+    assert "recovery NARRATIVE" in joined and "✓" in joined
+    for ln in scripted_lines:
+        assert _UNIFIED_SCHEMA.match(ln), \
+            f"scripted line lacks state numbers: {ln!r}"
