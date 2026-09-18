@@ -330,6 +330,8 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         chunk = next(gen, None)
         while chunk is not None:
             _record(chunk)
+            if chunk["event"] == "recovery_start":
+                _paint_idle_feed(None)   # paint BEFORE the inline solve
             if chunk["event"] == "day_end":
                 terminal = True
                 break
@@ -680,6 +682,7 @@ def render() -> None:
                     f"[t={chunk['t']:>4}] ⏳ recovery starting "
                     f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
                     " this takes minutes (translate + solver floor)…")
+                _paint_idle_feed(None)   # paint BEFORE the inline solve
 
                 continue
             st.session_state["sim_last_idx"] = chunk["idx"] + 1
@@ -748,6 +751,8 @@ def render() -> None:
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
                     st.session_state["sim_clock"] = chunk["t"]
                 st.session_state["sim_feed"].append(line)
+                if chunk["event"] == "recovery_start":
+                    _paint_idle_feed(None)   # paint BEFORE the solve
 
                 if chunk["event"] not in ("recovery_start",
                                           "auto_recover"):

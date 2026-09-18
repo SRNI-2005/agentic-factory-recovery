@@ -500,6 +500,64 @@ def test_live_lane_state_isolated_from_scripted(clean_db, demo_scenario,
         st.session_state["sim_active_instance"]
 
 
+def test_recovery_start_paints_before_inline_solve(
+        clean_db, demo_scenario, tmp_path, monkeypatch, request):
+    """Bug 2026-09-18 (user report): a render pass that consumes a
+    recovery_start chunk appended the ⏳ line but painted NOTHING until
+    the walk consumed its terminator — the inline solve (minutes, 180s
+    floor) ran against a frozen t=0 with no feedback. execute_recovery
+    is stubbed to RECORD the log markdown already painted at call time:
+    the ⏳ line must be visible the moment the solve BEGINS."""
+    instance = _baseline_instance()   # BEFORE the env squeeze: the
+    # baseline CLI subprocess must solve with the full default budget;
+    # the narrative pre-flight (§4.4) needs an active schedule anyway.
+    monkeypatch.setenv("SIMULATE_CLONE", "false")
+    from coe.config import get_settings
+    get_settings.cache_clear()
+    request.addfinalizer(get_settings.cache_clear)  # no stale-cached env
+
+    p = tmp_path / "tiny2.json"
+    p.write_text(json.dumps({
+        "name": "tiny2", "seed": 1, "horizon_days": 1,
+        "auto_recover": True,
+        "events": [
+            {"t": 100, "kind": "NARRATIVE",
+             "text": "M3 gearbox seized, sparks everywhere",
+             "severity": "HIGH"},
+        ]}))
+
+    st = _make_st()
+    import coe.agents.graph as graph_mod
+
+    def _stub_recovery(*a, **kw):
+        # record what the log surface showed when the solve BEGAN
+        st._md_at_solve = [
+            c.args[0] for c in
+            st.empty.return_value.markdown.call_args_list]
+        return {"status": "COMMITTED",
+                "state": types.SimpleNamespace(committed_version_id=None)}
+
+    monkeypatch.setattr(graph_mod, "execute_recovery", _stub_recovery)
+
+    from coe.dashboard.pages import simulate
+    sim_page = _stub_render_env(monkeypatch, st)
+
+    st.session_state["instance"] = instance
+    st.session_state["sim_mode"] = "scripted"
+    st.session_state["sim_script"] = str(p)
+    st.session_state["sim_speed"] = "instant"
+
+    sim_page.render()
+
+    assert st.session_state["sim_last_idx"] == 1
+    feed = "\n".join(st.session_state["sim_feed"])
+    assert "recovery starting" in feed
+    assert "recovery NARRATIVE" in feed and "✓" in feed
+    assert any("recovery starting" in m for m in st._md_at_solve), (
+        "the ⏳ recovery-starting line must be painted BEFORE the inline "
+        "solve runs (pre-fix the log only painted after the terminator)")
+
+
 # ---------------------------------------------------------------------------
 # live-lane pause/resume (spec §3 step 5)
 # ---------------------------------------------------------------------------
