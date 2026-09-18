@@ -83,10 +83,10 @@ def test_log_paints_capped_tail(monkeypatch, request):
                                                 # per stubbed render)
 
     simulate.render()
-    feed = list(st.session_state["sim_feed"])
+    feed = list(st.session_state["sim_feed_live"])
     assert len(feed) > 10, "baseline day must exceed the cap for the tail"
 
-    simulate._paint_idle_feed(None)
+    simulate._paint_idle_feed("live", None)
     md = st.empty.return_value.markdown.call_args_list[-1].args[0]
     # hard line breaks (two-space + newline) = tight 10-row block
     rendered_lines = [ln.rstrip() for ln in md.split("\n")]
@@ -262,7 +262,7 @@ def test_paced_run_pause_resume_terminal(
     assert st.session_state["sim_last_idx"] == 1
     assert st.session_state["sim_paused"] is False
     assert st.session_state["sim_running"] is True
-    assert len(st.session_state["sim_feed"]) == 1
+    assert len(st.session_state["sim_feed_scripted"]) == 1
 
     # 2. Pause → playback stops, paused flag set, page halts.
     pressed["run"] = False
@@ -279,7 +279,7 @@ def test_paced_run_pause_resume_terminal(
     sim_page.render()
     assert st.session_state["sim_paused"] is False
     assert st.session_state["sim_last_idx"] == 2
-    assert len(st.session_state["sim_feed"]) == 2
+    assert len(st.session_state["sim_feed_scripted"]) == 2
 
     # 4. No button pressed, still running → walker yields the done chunk;
     #    page reaches Terminal without re-walking consumed events.
@@ -364,7 +364,7 @@ def test_paced_no_duplicate_lines_across_rerenders(
     st.session_state["sim_speed"] = 30
 
     def _recovery_start_lines():
-        return [ln for ln in st.session_state["sim_feed"]
+        return [ln for ln in st.session_state["sim_feed_scripted"]
                 if "recovery starting" in ln]
 
     # 1. Run → the narrative step is entered inline: the rerender shows
@@ -382,7 +382,8 @@ def test_paced_no_duplicate_lines_across_rerenders(
         "duplicate ⏳ recovery-starting lines across the rewound rerender")
 
     # 3. Global uniqueness still holds (original invariant).
-    lines = [ln for ln in st.session_state["sim_feed"] if ln.strip()]
+    lines = [ln for ln in st.session_state["sim_feed_scripted"]
+             if ln.strip()]
     assert len(lines) == len(set(lines)), "duplicate feed lines remain"
 
 
@@ -409,7 +410,7 @@ def test_live_mode_runs_to_end_instantly(clean_db, demo_scenario):
     st.session_state["sim_speed"] = "instant"
     st.session_state["sim_run_pressed"] = True
     simulate.render()
-    feed = list(st.session_state["sim_feed"])
+    feed = list(st.session_state["sim_feed_live"])
     assert any("day_end" in ln for ln in feed)
     assert len(feed) == len(set(feed))
     assert not any("recovery" in ln for ln in feed)
@@ -430,7 +431,7 @@ def test_live_mode_does_not_autostart(clean_db, demo_scenario):
     simulate.render()    # idle path paints a hint and RETURNS normally
                          # (st.stop after a paint would orphan elements —
                          # double-log bug 2026-09-16)
-    assert st.session_state["sim_feed"] == []
+    assert st.session_state["sim_feed_live"] == []
     assert st.session_state["sim_live_clock"] == 0
     assert st.session_state.get("sim_running") is False
 
@@ -448,7 +449,7 @@ def test_live_chat_queues_and_solves(clean_db, demo_scenario):
     st.session_state["sim_run_pressed"] = True
     st.session_state["sim_chat_text"] = "M3 gearbox seized, sparks everywhere"
     simulate.render()
-    joined = "\n".join(st.session_state["sim_feed"])
+    joined = "\n".join(st.session_state["sim_feed_live"])
     assert "recovery" in joined and "COMMITTED" in joined
 
 
@@ -550,7 +551,7 @@ def test_recovery_start_paints_before_inline_solve(
     sim_page.render()
 
     assert st.session_state["sim_last_idx"] == 1
-    feed = "\n".join(st.session_state["sim_feed"])
+    feed = "\n".join(st.session_state["sim_feed_scripted"])
     assert "recovery starting" in feed
     assert "recovery NARRATIVE" in feed and "✓" in feed
     assert any("recovery starting" in m for m in st._md_at_solve), (
@@ -614,7 +615,7 @@ def test_live_pause_holds_walk_state(monkeypatch, request):
     simulate.render()
     assert st.rerun.called
     assert st.session_state["sim_running"] is True
-    feed_after_run = list(st.session_state["sim_feed"])
+    feed_after_run = list(st.session_state["sim_feed_live"])
     clock_after_run = st.session_state["sim_live_clock"]
     assert feed_after_run
 
@@ -636,7 +637,7 @@ def test_live_pause_holds_walk_state(monkeypatch, request):
     st.empty.return_value.markdown.reset_mock()
     st.empty.return_value.caption.reset_mock()
     simulate.render()
-    assert st.session_state["sim_feed"] == feed_after_run
+    assert st.session_state["sim_feed_live"] == feed_after_run
     assert st.session_state["sim_live_clock"] == clock_after_run
     assert st.session_state["sim_live_paused"] is True
 
@@ -654,7 +655,7 @@ def test_live_resume_continues(monkeypatch, request):
     _seed_live_session(st, _baseline_instance(), press=True)
 
     simulate.render()
-    feed_1 = list(st.session_state["sim_feed"])
+    feed_1 = list(st.session_state["sim_feed_live"])
     clock_1 = st.session_state["sim_live_clock"]
 
     st.sidebar._col_pause.button = MagicMock(return_value=True)
@@ -666,10 +667,10 @@ def test_live_resume_continues(monkeypatch, request):
     st.sidebar._col_run.button = MagicMock(return_value=True)
     simulate.render()
     assert st.session_state["sim_live_paused"] is False
-    assert len(st.session_state["sim_feed"]) > len(feed_1)
+    assert len(st.session_state["sim_feed_live"]) > len(feed_1)
     assert st.session_state["sim_live_clock"] > clock_1
     # dedup invariant holds across the pause boundary
-    lines = [ln for ln in st.session_state["sim_feed"] if ln.strip()]
+    lines = [ln for ln in st.session_state["sim_feed_live"] if ln.strip()]
     assert len(lines) == len(set(lines))
 
 
@@ -695,7 +696,7 @@ def test_live_recovery_start_completes_inline(monkeypatch, request):
     st.session_state["sim_chat_text"] = "M3 gearbox seized, sparks everywhere"
 
     simulate.render()
-    feed = "\n".join(st.session_state["sim_feed"])
+    feed = "\n".join(st.session_state["sim_feed_live"])
     assert "recovery starting" in feed
     assert "recovery NARRATIVE" in feed and "COMMITTED" in feed
     assert st.session_state["sim_live_paused"] is False
@@ -740,6 +741,59 @@ def _stub_render_env(monkeypatch, st):
     return sim_page
 
 
+def test_lane_feeds_are_scoped_and_survive_switches(
+        clean_db, demo_scenario, tmp_path, monkeypatch, request):
+    """Bug 2026-09-18 (user report): live and scripted lanes SHARED one
+    sim_feed list — switching modes showed the other lane's events and
+    hid your own. Feeds must be lane-scoped: sim_feed_live vs
+    sim_feed_scripted, each surviving mode switches."""
+    _live_pace_env(monkeypatch, request)
+    script_path = _two_event_script(tmp_path)
+
+    st = _make_st()
+    sim_page = _stub_render_env(monkeypatch, st)
+    # the radio must follow the staged sim_mode (mode-switch seam)
+    st.sidebar.radio = MagicMock(side_effect=lambda _label, _opts, **kw:
+                                 "Live day"
+                                 if st.session_state.get("sim_mode") == "live"
+                                 else "Scripted replay")
+    st.chat_input = MagicMock(return_value=None)
+
+    # 1. Scripted lane (manual_entry): run the whole tiny script.
+    st.session_state["instance"] = "factory_demo_01"
+    st.session_state["sim_mode"] = "scripted"
+    st.session_state["sim_script"] = script_path
+    st.session_state["sim_speed"] = "instant"
+    sim_page.render()
+    scripted_feed = list(st.session_state["sim_feed_scripted"])
+    assert len(scripted_feed) == 2
+    assert all("[t=" in ln for ln in scripted_feed)
+
+    # 2. Switch to live — idle lane (no run press): its log must NOT
+    #    show the scripted lines and its feed stays empty, while the
+    #    scripted feed is retained untouched.
+    st.empty.return_value.markdown.reset_mock()
+    st.session_state["sim_mode"] = "live"
+    sim_page.render()
+    assert st.session_state["sim_feed_live"] == []
+    assert st.session_state["sim_feed_scripted"] == scripted_feed
+    md_calls = [c.args[0]
+                for c in st.empty.return_value.markdown.call_args_list]
+    assert not any("[t=" in m for m in md_calls), (
+        "live lane's log must not show the scripted lane's events")
+
+    # 3. Switch back to scripted: the scripted log repaints its lines.
+    st.empty.return_value.markdown.reset_mock()
+    st.session_state["sim_mode"] = "scripted"
+    sim_page.render()
+    md_calls = [c.args[0]
+                for c in st.empty.return_value.markdown.call_args_list]
+    assert any("[t=" in m for m in md_calls), (
+        "scripted lane's log must repaint its own lines after the "
+        "round-trip")
+    assert all(ln in "\n".join(md_calls) for ln in scripted_feed)
+
+
 def test_scripted_ignores_stale_live_running_flag(
         clean_db, tmp_path, monkeypatch):
     """IMPORTANT-1 regression: switching Mode to Scripted replay mid-
@@ -767,7 +821,7 @@ def test_scripted_ignores_stale_live_running_flag(
     sim_page.render()   # pre-fix: walks with instance=None → DB hit/error
 
     assert st.session_state["sim_last_idx"] == 0
-    assert st.session_state["sim_feed"] == []
+    assert st.session_state["sim_feed_scripted"] == []
     assert not st.rerun.called
     assert any("Press Run to start" in str(c.args[0])
                for c in st.empty.return_value.caption.call_args_list)
@@ -824,7 +878,7 @@ def test_idle_feed_panel_survives_pause_and_completion(
     pressed["run"] = True
     sim_page.render()
     assert st.session_state["sim_last_idx"] == 1
-    feed_line = st.session_state["sim_feed"][0]
+    feed_line = st.session_state["sim_feed_scripted"][0]
 
     # 2. Pause press → halted; then an idle paused rerender (no press)
     #    must repaint the feed with a Paused caption.
@@ -853,7 +907,7 @@ def test_idle_feed_panel_survives_pause_and_completion(
     pressed["run"] = False
     sim_page.render()
     assert st.session_state["sim_running"] is False
-    assert len(st.session_state["sim_feed"]) == 2
+    assert len(st.session_state["sim_feed_scripted"]) == 2
 
     # 5. Idle rerender after completion → "Day complete." + full feed.
     st.empty.return_value.markdown.reset_mock()
@@ -863,7 +917,7 @@ def test_idle_feed_panel_survives_pause_and_completion(
     assert any("Day complete" in str(c.args[0])
                for c in st.empty.return_value.caption.call_args_list)
     assert markdown_calls() == [
-        "  \n".join(st.session_state["sim_feed"])], \
+        "  \n".join(st.session_state["sim_feed_scripted"])], \
         "day-complete rerender must repaint the feed"
 
 

@@ -206,11 +206,18 @@ _LOG_TAIL = 10
 _LOG_VIEWPORT = 280          # fits 10 tight rows without inner scrolling
 
 
-def _paint_idle_feed(caption: str | None,
+def _paint_idle_feed(lane: str | None,
+                     caption: str | None,
                      full: bool = False) -> None:
     """THE single event-log surface (bug 2026-09-16 fix).
 
     Plain markdown, painted in every state; both lanes call only this.
+
+    LANE-SCOPED feed (bug 2026-09-18): the painted list is the lane's
+    own — ``sim_feed_live`` or ``sim_feed_scripted`` — so switching
+    modes shows each lane's own log. ``lane=None`` reads the legacy
+    shared ``sim_feed`` key (pre-lane callers only; no production
+    caller remains).
 
     TREE-STABLE paint (double-box bug 2026-09-17): the SAME element
     sequence is emitted in EVERY state — caption slot, count caption,
@@ -230,7 +237,10 @@ def _paint_idle_feed(caption: str | None,
     """
     import streamlit as st
 
-    feed = st.session_state.get("sim_feed") or []
+    if lane is not None:
+        feed = st.session_state.get("sim_feed_" + lane) or []
+    else:
+        feed = st.session_state.get("sim_feed") or []
     shown = feed if full else feed[-_LOG_TAIL:]
     hint = st.empty()
     hint.caption(caption or "")
@@ -265,7 +275,7 @@ def _ensure_live_lane(instance_name: str) -> str:
         st.session_state["sim_live_instance"] = instance_name
         st.session_state["sim_interrupt_q"] = InterruptQueue()
         st.session_state["sim_seen"] = set()
-        st.session_state["sim_feed"] = []
+        st.session_state["sim_feed_live"] = []
         st.session_state["sim_live_clock"] = 0
         st.session_state["sim_complete"] = False
         st.session_state["sim_live_paused"] = False
@@ -317,7 +327,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         if key in st.session_state["sim_seen"]:
             return
         st.session_state["sim_seen"].add(key)
-        st.session_state["sim_feed"].append(_feed_line(chunk))
+        st.session_state["sim_feed_live"].append(_feed_line(chunk))
         st.session_state["sim_live_clock"] = chunk["t"]
 
     terminal = False
@@ -331,7 +341,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         while chunk is not None:
             _record(chunk)
             if chunk["event"] == "recovery_start":
-                _paint_idle_feed(None)   # paint BEFORE the inline solve
+                _paint_idle_feed("live", None)   # paint BEFORE the solve
             if chunk["event"] == "day_end":
                 terminal = True
                 break
@@ -362,6 +372,7 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
             _render_diff(active,
                          st.session_state["sim_live_before_entries"])
     _paint_idle_feed(
+        "live",
         "Day complete. Select a new instance to replay."
         if terminal else None, full=terminal)
     if terminal:
@@ -393,7 +404,7 @@ def render() -> None:
         ("sim_running", False), ("sim_running_lane", None),
         ("sim_clock", 0), ("sim_total", 0),
         ("sim_active_instance", None), ("sim_before_entries", None),
-        ("sim_feed", []),
+        ("sim_feed_live", []), ("sim_feed_scripted", []),
         ("sim_mode", "live"), ("sim_interrupt_q", None),
         ("sim_seen", set()),
         ("sim_live_active", None), ("sim_live_clock", 0),
@@ -457,7 +468,8 @@ def render() -> None:
             # order stays deterministic.
             _paint_board(st.session_state["sim_live_active"],
                          st.session_state["sim_live_clock"])
-            _paint_idle_feed("Day complete. Select a new instance to replay.",
+            _paint_idle_feed("live",
+                             "Day complete. Select a new instance to replay.",
                              full=True)
             return
         active_lane = _ensure_live_lane(instance_name)
@@ -507,7 +519,7 @@ def render() -> None:
             # tree: double-log bug 2026-09-16)
             st.session_state["sim_running"] = False
             st.session_state["sim_running_lane"] = None
-            _paint_idle_feed("Paused — press Resume.", full=True)
+            _paint_idle_feed("live", "Paused — press Resume.", full=True)
             return
         if run_pressed:
             # Clear the pause BEFORE any early-stop so the walk resumes
@@ -518,9 +530,9 @@ def render() -> None:
             # paced self-advancement rerender: no press, keep walking
             _render_live(active_lane, llm_client_factory, speed)
         elif live_paused:
-            _paint_idle_feed("Paused — press Resume.", full=True)
+            _paint_idle_feed("live", "Paused — press Resume.", full=True)
         else:
-            _paint_idle_feed("Press Resume to start the live day.")
+            _paint_idle_feed("live", "Press Resume to start the live day.")
         return
 
     # --- timeline source ---------------------------------------------------
@@ -589,7 +601,7 @@ def render() -> None:
             st.info("Playback paused. Press Resume to continue.")
             # full history; run ends NORMALLY — st.stop() after painting
             # orphans this run's elements (double-log bug 2026-09-16)
-            _paint_idle_feed(None, full=True)
+            _paint_idle_feed("scripted", None, full=True)
             return
     else:
         run_pressed = True
@@ -624,7 +636,7 @@ def render() -> None:
             st.session_state["sim_active_instance"] = active
             st.session_state["sim_last_idx"] = 0
             st.session_state["sim_clock"] = 0
-            st.session_state["sim_feed"] = []
+            st.session_state["sim_feed_scripted"] = []
             st.session_state["sim_seen"] = set()   # a second day repaints
             st.session_state["sim_before_entries"] = \
                 _fetch_active_entries(active)
@@ -644,15 +656,17 @@ def render() -> None:
     paused = st.session_state["sim_paused"]
     if not running or paused:
         # Idle lane: keep the feed visible (paused / completed rerenders).
-        feed = st.session_state["sim_feed"]
+        feed = st.session_state["sim_feed_scripted"]
         if running:
-            _paint_idle_feed("Paused — press Run/Resume.", full=True)
+            _paint_idle_feed("scripted", "Paused — press Run/Resume.",
+                             full=True)
         elif finished and feed:
-            _paint_idle_feed("Day complete.", full=True)
+            _paint_idle_feed("scripted", "Day complete.", full=True)
         elif not feed:
-            _paint_idle_feed("Press Run to start the scripted day.")
+            _paint_idle_feed("scripted",
+                             "Press Run to start the scripted day.")
         else:
-            _paint_idle_feed(None, full=True)
+            _paint_idle_feed("scripted", None, full=True)
         return
 
     active = st.session_state["sim_active_instance"]
@@ -678,11 +692,11 @@ def render() -> None:
                 if key in st.session_state["sim_seen"]:
                     continue
                 st.session_state["sim_seen"].add(key)
-                st.session_state["sim_feed"].append(
+                st.session_state["sim_feed_scripted"].append(
                     f"[t={chunk['t']:>4}] ⏳ recovery starting "
                     f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
                     " this takes minutes (translate + solver floor)…")
-                _paint_idle_feed(None)   # paint BEFORE the inline solve
+                _paint_idle_feed("scripted", None)   # paint BEFORE the solve
 
                 continue
             st.session_state["sim_last_idx"] = chunk["idx"] + 1
@@ -693,11 +707,11 @@ def render() -> None:
                 if chunk["event"] == "recovery":
                     status = chunk.get("status", "?")
                     mark = "✓" if status == "COMMITTED" else f"✗ {status}"
-                    st.session_state["sim_feed"].append(
+                    st.session_state["sim_feed_scripted"].append(
                         f"[t={chunk['t']:>4}] recovery {chunk['kind']} — "
                         f"{mark}")
                 else:
-                    st.session_state["sim_feed"].append(
+                    st.session_state["sim_feed_scripted"].append(
                         f"[t={chunk['t']:>4}] {chunk['event']} "
                         f"{chunk.get('kind', '')}".rstrip())
 
@@ -750,9 +764,9 @@ def render() -> None:
                             f"{chunk.get('kind', '')}".rstrip())
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
                     st.session_state["sim_clock"] = chunk["t"]
-                st.session_state["sim_feed"].append(line)
+                st.session_state["sim_feed_scripted"].append(line)
                 if chunk["event"] == "recovery_start":
-                    _paint_idle_feed(None)   # paint BEFORE the solve
+                    _paint_idle_feed("scripted", None)   # paint BEFORE the solve
 
                 if chunk["event"] not in ("recovery_start",
                                           "auto_recover"):
@@ -773,7 +787,7 @@ def render() -> None:
 
     # ONE log surface: painted after the walk in every pass outcome —
     # full history at day end, tail mid-walk.
-    _paint_idle_feed(None, full=terminal is not None)
+    _paint_idle_feed("scripted", None, full=terminal is not None)
     if terminal is not None:
         st.session_state["sim_running"] = False
         st.session_state["sim_last_idx"] = total
