@@ -1024,3 +1024,30 @@ def test_live_day_end_diff_below_final_board(
     # terminal pass: board repaint + the diff chart (end-to-end
     # _render_diff, no monkeypatch of the seam)
     assert st.plotly_chart.call_count >= 2
+
+
+def test_display_clock_paces_and_freezes_at_target():
+    from coe.dashboard.pages.simulate import DisplayClock
+    import types
+
+    fake_time = {"now": 0.0}
+    clock = DisplayClock(speed=30)
+    clock.prev_t = 0
+    clock.arm(target_t=90)          # 90 min gap at 30x = 3.0 wall-seconds
+    fake_time["now"] = 1.5
+    assert clock.advance(fake_time["now"]) == 45
+    fake_time["now"] = 2.9
+    assert clock.advance(fake_time["now"]) == 87
+    fake_time["now"] = 3.0
+    assert clock.advance(fake_time["now"]) == 90    # exactly target
+    fake_time["now"] = 9.0
+    assert clock.advance(fake_time["now"]) == 90    # holds AT target
+
+
+def test_display_clock_instant_jumps():
+    from coe.dashboard.pages.simulate import DisplayClock
+
+    c = DisplayClock(speed="instant")
+    c.prev_t = 0
+    c.arm(target_t=90)
+    assert c.advance(now=0.001) == 90

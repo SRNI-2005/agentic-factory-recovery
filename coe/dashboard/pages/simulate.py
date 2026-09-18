@@ -184,6 +184,38 @@ def _walk_paced_seconds(speed) -> float:
         return 2.0
 
 
+class DisplayClock:
+    """Speed-paced display minute for the scripted arm (spec §10.1).
+
+    Paces [prev_t, target_t] over (target-prev)/N wall-seconds; caps at
+    target. Instant jumps. Survives solve pauses because the target is
+    reached by 'time still materially pending'.
+    """
+
+    def __init__(self, *, speed):
+        self._speed = speed
+        self.prev_t = 0
+        self._target = 0
+        self._start_t = 0
+        self._armed_at = 0.0
+
+    def arm(self, target_t: int, now: float = 0.0) -> None:
+        self._armed_at = now
+        self._target = int(target_t)
+        self._start_t = self.prev_t
+
+    def advance(self, now: float) -> int:
+        gap = max(self._target - self._start_t, 1)
+        if self._speed == "instant":
+            self.prev_t = self._target
+            return self.prev_t
+        wall_seconds = gap / max(int(self._speed), 1)
+        elapsed = max(now - self._armed_at, 0.0)
+        self.prev_t = min(self._target, int(
+            self._start_t + gap * (elapsed / wall_seconds)))
+        return self.prev_t
+
+
 def _feed_line(chunk: dict) -> str:
     ev = chunk.get("event", "?")
     t = chunk.get("t", "—")
