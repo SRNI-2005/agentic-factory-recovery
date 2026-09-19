@@ -395,12 +395,13 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
         if key in st.session_state["sim_seen"]:
             return
         st.session_state["sim_seen"].add(key)
-        st.session_state["sim_feed_live"].append(_feed_line(chunk, active))
         if (chunk.get("event") == "recovery"
                 and chunk.get("status") == "COMMITTED"):
-            # the board changed — the (instance, t) memo must not feed
-            # later lines in this pass the pre-commit state
+            # FINAL-REVIEW FIX 2': the board changed — clear BEFORE the
+            # line's _board_state_line (via _feed_line) so the COMMITTED
+            # line reads post-commit state.
             st.session_state["sim_state_memo"] = {}
+        st.session_state["sim_feed_live"].append(_feed_line(chunk, active))
         st.session_state["sim_live_clock"] = chunk["t"]
 
     terminal = False
@@ -724,17 +725,49 @@ def render() -> None:
 
     _render_idle(tl)
     _render_day()
-    if st.session_state.get("sim_active_instance"):
-        _paint_board(
-            st.session_state["sim_active_instance"],
-            st.session_state.get(
-                "sim_display_t", st.session_state.get("sim_clock", 0)))
 
     # Recompute AFTER the start_run block: a fresh Run press just set
     # sim_running/sim_running_lane above.
     running = (st.session_state["sim_running"]
                and st.session_state.get("sim_running_lane") == "scripted")
     paused = st.session_state["sim_paused"]
+    active = st.session_state["sim_active_instance"]
+
+    # FINAL-REVIEW FIX 1 (2026-09-19): the paced sweep advance happens
+    # BEFORE the single board paint — one board stanza per pass, carrying
+    # the CURRENT interpolated minute. The old order painted the board
+    # with the previous pass's sim_display_t here and repainted inside
+    # the sweep branch (two stacked boards, top stale by one dwell).
+    disp_t = None
+    sweep_target = None
+    dwell = None
+    if (active and running and not paused and speed != "instant"):
+        import time
+
+        entries = _fetch_active_entries(active)
+        makespan = max((int(e["end_time"]) for e in entries), default=0)
+        authored = [int(ev.t) for ev in tl.events]
+        last_idx = st.session_state["sim_last_idx"]
+        upcoming = (authored[last_idx] if last_idx < len(authored)
+                    else makespan)
+        sweep_target = min(upcoming, makespan)
+        display = st.session_state.setdefault(
+            "sim_display", DisplayClock(speed=speed))
+        display.prev_t = st.session_state.get("sim_display_t", 0)
+        dwell = min(_walk_paced_seconds(speed), 2.0)
+        now = time.monotonic()
+        display.arm(sweep_target, now)
+        disp_t = display.advance(now + dwell)   # interpolate THIS pass
+        st.session_state["sim_display_t"] = disp_t
+
+    # THE single board paint of the pass (spec §4.3: one chart at one
+    # call site; the sweep advance above made the minute current).
+    if active:
+        _paint_board(
+            active,
+            st.session_state.get(
+                "sim_display_t", st.session_state.get("sim_clock", 0)))
+
     if not running or paused:
         # Idle lane: keep the feed visible (paused / completed rerenders).
         feed = st.session_state["sim_feed_scripted"]
@@ -750,7 +783,6 @@ def render() -> None:
             _paint_idle_feed("scripted", None, full=True)
         return
 
-    active = st.session_state["sim_active_instance"]
     before_entries = st.session_state["sim_before_entries"]
 
     terminal = None
@@ -791,13 +823,16 @@ def render() -> None:
                 if chunk["event"] == "recovery":
                     status = chunk.get("status", "?")
                     mark = "✓" if status == "COMMITTED" else f"✗ {status}"
+                    if status == "COMMITTED":
+                        # FINAL-REVIEW FIX 2': clear BEFORE the line's
+                        # _board_state_line so the COMMITTED line's
+                        # done/running read the post-commit board.
+                        st.session_state["sim_state_memo"] = {}
                     st.session_state["sim_feed_scripted"].append(
                         _board_state_line(
                             active, chunk["t"],
                             f"recovery {chunk['kind']} — "
                             f"{mark}"))
-                    if status == "COMMITTED":
-                        st.session_state["sim_state_memo"] = {}
                 else:
                     st.session_state["sim_feed_scripted"].append(
                         _board_state_line(
@@ -807,38 +842,23 @@ def render() -> None:
 
     else:
         # Paced mode: the DISPLAY clock sweeps (DisplayClock, Task 1)
-        # toward the next authored event minute (or the board horizon);
-        # each pass advances the display proportionally to the dwell and
-        # repaints the board at the interpolated minute. Terminators
-        # (event chunks) are only consumed once the display HAS reached
-        # the authored minute — events no longer teleport the board.
-        # The chunk-consumption loop below keeps today's semantics
-        # exactly (recovery_start/recovery inline-block, sim_last_idx,
-        # dedup, lane feed, tree-stable paints); `_walk_paced_seconds`
-        # stays the RERENDER CADENCE cap, unchanged.
-        import time
+        # toward the next authored event minute (or the board horizon).
+        # The advance ran in the prelude above (before the single board
+        # paint — Fix 1); a pass is either a SWEEP pass (display still
+        # short of the target: dwell + self-advance, the board is
+        # already painted) or a TERMINATOR pass (consumes ONE chunk).
+        # Terminators (event chunks) are only consumed once the display
+        # HAS reached the authored minute — events no longer teleport
+        # the board. The chunk-consumption loop below keeps today's
+        # semantics exactly (recovery_start/recovery inline-block,
+        # sim_last_idx, dedup, lane feed, tree-stable paints).
+        if disp_t is not None and disp_t < sweep_target:
+            # Sweep pass: the board painted above at the interpolated
+            # minute IS the pass's single stanza — the terminator waits
+            # until the display is AT the authored event minute (or the
+            # horizon).
+            import time
 
-        entries = _fetch_active_entries(active)
-        makespan = max((int(e["end_time"]) for e in entries), default=0)
-        authored = [int(ev.t) for ev in tl.events]
-        last_idx = st.session_state["sim_last_idx"]
-        upcoming = (authored[last_idx] if last_idx < len(authored)
-                    else makespan)
-        sweep_target = min(upcoming, makespan)
-        display = st.session_state.setdefault(
-            "sim_display", DisplayClock(speed=speed))
-        display.prev_t = st.session_state.get("sim_display_t", 0)
-        dwell = min(_walk_paced_seconds(speed), 2.0)
-        now = time.monotonic()
-        display.arm(sweep_target, now)
-        disp_t = display.advance(now + dwell)   # interpolate THIS pass
-        st.session_state["sim_display_t"] = disp_t
-
-        if disp_t < sweep_target:
-            # Sweep pass: board paint at the interpolated minute only —
-            # the terminator waits until the display is AT the authored
-            # event minute (or the horizon).
-            _paint_board(active, disp_t)
             _paint_idle_feed("scripted", None)
             time.sleep(dwell)
             st.rerun()
@@ -880,11 +900,13 @@ def render() -> None:
                     status = chunk.get("status", "?")
                     mark = ("✓ COMMITTED" if status == "COMMITTED"
                             else f"✗ {status}")
+                    if status == "COMMITTED":
+                        # FINAL-REVIEW FIX 2': clear BEFORE the line's
+                        # _board_state_line (post-commit state numbers).
+                        st.session_state["sim_state_memo"] = {}
                     line = _board_state_line(
                         active, chunk["t"],
                         f"recovery {chunk.get('kind', '')} — {mark}")
-                    if status == "COMMITTED":
-                        st.session_state["sim_state_memo"] = {}
                     st.session_state["sim_last_idx"] = chunk["idx"] + 1
                     # terminator consumption: the sweep re-arms from
                     # the authored minute (display jumps to the event).
@@ -938,12 +960,18 @@ def render() -> None:
         else:
             st.info("Day finished — structured events absorbed "
                     "without a recovery solve.")
-        # Day-end clock: the display may have swept PAST the last
-        # ingest (makespan terminus, spec §10.1) — the rail cites the
-        # day-end clock, not the final ingest's t.
+        # Day-end clock (FINAL-REVIEW FIX 2, spec §10.1 AC 8): the
+        # instant path has no DisplayClock, so the display never sweeps
+        # past the last ingest — clamp the terminus to the active
+        # schedule's TRUE makespan; the rail cites the day-end clock.
+        makespan = max((int(e["end_time"])
+                        for e in _fetch_active_entries(active)), default=0)
         display_t = st.session_state.get("sim_display_t", 0)
-        end_clock = max(st.session_state["sim_clock"], display_t)
+        end_clock = max(st.session_state["sim_clock"], display_t, makespan)
         st.session_state["sim_display_t"] = end_clock
+        # terminal board repaint at the day-end clock — settles the
+        # stale terminal-pass paint on both paths (live-lane parity).
+        _paint_board(active, end_clock)
         st.caption(_rail_line(active, end_clock))
         if before_entries:
             _render_diff(active, before_entries)

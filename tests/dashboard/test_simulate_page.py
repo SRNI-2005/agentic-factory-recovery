@@ -563,6 +563,18 @@ def test_recovery_start_paints_before_inline_solve(
         "the ⏳ recovery-starting line must be painted BEFORE the inline "
         "solve runs (pre-fix the log only painted after the terminator)")
 
+    # Final-review Fix 2 (AC 8): the instant terminus is clamped to the
+    # active schedule's TRUE makespan (no DisplayClock on the instant
+    # path to sweep there) and the terminal repaint binds sim_display_t
+    # to end_clock via _paint_board.
+    makespan = max(int(e["end_time"]) for e in
+                   sim_page._fetch_active_entries(
+                       st.session_state["sim_active_instance"]))
+    assert makespan > 100, "baseline day must extend past the last ingest"
+    assert st.session_state["sim_display_t"] >= makespan - 1, (
+        "instant day must end at the true makespan, not the last "
+        "ingest's clock")
+
 
 # ---------------------------------------------------------------------------
 # live-lane pause/resume (spec §3 step 5)
@@ -1042,7 +1054,6 @@ def test_live_day_end_diff_below_final_board(
 
 def test_display_clock_paces_and_freezes_at_target():
     from coe.dashboard.pages.simulate import DisplayClock
-    import types
 
     fake_time = {"now": 0.0}
     clock = DisplayClock(speed=30)
@@ -1098,14 +1109,26 @@ def test_scripted_paces_between_events(
     st.sidebar.selectbox = MagicMock(return_value="parity.json")
     col = st.sidebar._col_run
     pressed = {"run": True}; col.button = lambda label, **k: pressed["run"]
+    st.plotly_chart.reset_mock()
     sim_page.render()          # pass 1: arms sweep toward 90
     assert 0 < st.session_state["sim_display_t"] < 90, (
         "pass must advance interpolation beyond 0 without reaching the "
         "event minute")
+    # Final-review Fix 1: ONE board stanza per pass — a sweep pass paints
+    # the board exactly ONCE, at the CURRENT interpolated minute (the
+    # old order stacked the previous pass's stale board above the fresh
+    # sweep paint = two chart calls per pass).
+    assert st.plotly_chart.call_count == 1, (
+        f"sweep pass must paint exactly ONE board, got "
+        f"{st.plotly_chart.call_count}")
     # pass 2..n until sweep arrives at 90, then the engine consumes the
     # event: after several passes the ingest completes.
     for _ in range(3):
+        st.plotly_chart.reset_mock()
         sim_page.render()
+        assert st.plotly_chart.call_count == 1, (
+            "every non-terminal walk pass paints exactly ONE board "
+            "(single stanza per pass)")
     assert st.session_state["sim_last_idx"] == 1   # event 1 consumed
 
 
@@ -1147,6 +1170,17 @@ def test_scripted_day_ends_at_board_horizon(
     assert st.session_state["sim_display_t"] > 300  # swept PAST the last
     # and the day never terminates before the display clock passes the
     # final ingest's clock (no stranding future ops at day end).
+
+    # Final-review Fix 2 binding: the terminal pass settles sim_display_t
+    # at end_clock (>= the active schedule's true makespan) and repaints
+    # the board there — the final board is never one dwell stale.
+    makespan = max(int(e["end_time"]) for e in
+                   sim_page._fetch_active_entries(
+                       st.session_state["sim_active_instance"]))
+    assert st.session_state["sim_display_t"] >= makespan - 1, (
+        "terminal repaint must bind display_t to the makespan end_clock")
+    assert st.plotly_chart.call_count >= 1, (
+        "terminal pass must repaint the board at end_clock")
 
 
 # ---------------------------------------------------------------------------
