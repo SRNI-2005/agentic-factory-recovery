@@ -93,17 +93,6 @@ def _fetch_active_entries(instance_name: str) -> list[dict]:
         return [dict(e) for e in entries]
 
 
-def _rail_line(instance_name: str, t: int) -> str:
-    from sqlalchemy.orm import Session
-
-    from coe.db.session import make_engine
-    from coe.simulator.projector import project_day
-
-    with Session(make_engine()) as s:
-        ds = project_day(s, instance_name=instance_name, t=t)
-    return ds.feed_line()
-
-
 def _render_diff(instance_name: str, before_entries: list[dict]) -> None:
     """Render the schedule diff — only at the terminal event."""
     import streamlit as st
@@ -122,24 +111,6 @@ def _render_diff(instance_name: str, before_entries: list[dict]) -> None:
     st.plotly_chart(frames[-1], use_container_width=True)
 
 
-def _render_idle(tl) -> None:
-    import streamlit as st
-
-    st.subheader(f"Timeline: **{tl.name}**")
-    st.caption(f"{len(tl.events)} events · "
-               f"horizon {tl.horizon_days} day(s) · seed {tl.seed}")
-
-
-def _render_day() -> None:
-    """Clock hero + board + event feed, tree-stable stanza order:
-    [clock slot][gantt slot handled by _paint_board][log stanza]."""
-    import streamlit as st
-
-    clock = st.session_state.get("sim_clock", 0)
-    slot = st.empty()
-    slot.metric("Day clock", f"{clock} min")
-
-
 def _jobs_palette(active: str) -> dict[str, str]:
     """One colour per JOB (same convention as the Configure page)."""
     # stable hash → hue within the dashboard palette set used before
@@ -154,69 +125,26 @@ def _jobs_palette(active: str) -> dict[str, str]:
     return out
 
 
-_STUB_BOARD_JOBS_COLORS = {}    # (instance, job_name) → hex; populated lazily
-
-
 def _paint_board(active: str, t: int) -> None:
-    """[clock][gantt] — tree-stable board stanza (spec §3).
+    """[gantt] — tree-stable board stanza (spec §3, A3 §11.3).
 
-    Emits the SAME two-slot sequence in every state: one st.empty
-    caption for the clock hero, then ONE st.plotly_chart. The chart
-    repaints per pass at its constant path (spec §4.3 amended);
-    between boundaries only the bar colours/state arrays change.
+    The clock hero is `_render_day(t)` (shared by both lanes); this
+    paints ONE st.plotly_chart per pass at a constant path (unique
+    key — the duplicate-ID crash fix 2026-09-19). The chart repaints
+    per pass at its constant path (spec §4.3 amended); between
+    boundaries only the bar colours/state arrays change.
     """
     import streamlit as st
 
     from coe.dashboard.gantt import build_board_figure
 
     entries = _fetch_active_entries(active)
-    clock = st.empty()
-    clock.caption(f"t = {int(t):>4} min")
     fig = build_board_figure(entries, int(t), _jobs_palette(active))
     if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True,
+                        key="sim_gantt")
     else:
         st.empty()          # keep the gantt slot in the tree
-
-
-def _walk_paced_seconds(speed) -> float:
-    """Dwell between paced rerenders (N× speed: the page owns pacing)."""
-    try:
-        return 60.0 / int(speed)
-    except (TypeError, ValueError):
-        return 2.0
-
-
-class DisplayClock:
-    """Speed-paced display minute for the scripted arm (spec §10.1).
-
-    Paces [prev_t, target_t] over (target-prev)/N wall-seconds; caps at
-    target. Instant jumps. Survives solve pauses because the target is
-    reached by 'time still materially pending'.
-    """
-
-    def __init__(self, *, speed):
-        self._speed = speed
-        self.prev_t = 0
-        self._target = 0
-        self._start_t = 0
-        self._armed_at = 0.0
-
-    def arm(self, target_t: int, now: float = 0.0) -> None:
-        self._armed_at = now
-        self._target = int(target_t)
-        self._start_t = self.prev_t
-
-    def advance(self, now: float) -> int:
-        gap = max(self._target - self._start_t, 1)
-        if self._speed == "instant":
-            self.prev_t = self._target
-            return self.prev_t
-        wall_seconds = gap / max(int(self._speed), 1)
-        elapsed = max(now - self._armed_at, 0.0)
-        self.prev_t = min(self._target, int(
-            self._start_t + gap * (elapsed / wall_seconds)))
-        return self.prev_t
 
 
 def _board_state_line(instance: str, t: int, detail: str) -> str:
@@ -324,47 +252,103 @@ def _paint_idle_feed(lane: str | None,
         box.markdown("  \n".join(shown) or "no events yet")
 
 
-def _ensure_live_lane(instance_name: str) -> str:
-    """Create/reset the live lane's private state and return the fork to
-    play. Runs at mode entry EVEN when the lane is idle (a fresh render
-    must not fork off a walk — only a Resume press starts one)."""
+def _event_narrative(ev) -> str:
+    """Timeline event → deterministic narrative text (spec A3 §11.2).
+
+    The authored event enters the SAME recovery path a typed disruptive
+    narration would; the phrasings carry the resource id + the
+    deterministic keywords the degraded translate path binds (failed /
+    maintenance / absent / back / shortage / restock) so narrative-only
+    replay resolves exactly like the live lane.
+    """
+    if ev.kind == "MACHINE" and ev.event_type == "FAILURE":
+        return f"Machine {ev.machine_id} failed — total shutdown, critical"
+    if ev.kind == "MACHINE":
+        return (f"Machine {ev.machine_id} down for maintenance"
+                f"{f' — about {ev.estimated_downtime} min' if ev.estimated_downtime else ''}")
+    if ev.kind == "WORKER" and ev.event_type == "WORKER_ABSENT":
+        return (f"Worker {ev.worker_id} absent — out sick"
+                f"{f' for about {ev.duration} min' if ev.duration else ''}")
+    if ev.kind == "WORKER":
+        return f"Worker {ev.worker_id} back, returns, available again"
+    if ev.kind == "MATERIAL" and ev.event_type == "MATERIAL_SHORTAGE":
+        return (f"Material {ev.sku} shortage — depleted, empty"
+                f"{f', need {ev.quantity}' if ev.quantity else ''}")
+    if ev.kind == "MATERIAL":
+        return (f"Material {ev.sku} restock delivery arrived"
+                f"{f' — refill of {ev.quantity}' if ev.quantity else ''}")
+    return ev.text
+
+
+def _event_schedule(tl) -> list[tuple[int, str]]:
+    """Authored timeline events → [(minute, narrative)] (spec A3)."""
+    return [(int(ev.t), _event_narrative(ev)) for ev in tl.events]
+
+
+def _render_day(t: int) -> None:
+    """Clock hero metric — the SAME hero in both lanes (spec A3 §11.3);
+    `_paint_board` paints the gantt under it without a clock caption.
+    """
     import streamlit as st
 
-    from coe.simulator.live import InterruptQueue
+    slot = st.empty()
+    slot.metric("Day clock", f"{int(t)} min")
 
-    st.session_state.setdefault("sim_complete", False)
 
-    # Live lane owns sim_live_active/sim_live_clock (private keys) — never
-    # the scripted lane's sim_active_instance/sim_clock. Re-fork only when
-    # the live lane has no active fork or its SOURCE changed; scripted-lane
-    # equality must never drive live-lane state.
-    if (st.session_state.get("sim_live_active") is None
-            or st.session_state.get("sim_live_instance") != instance_name):
-        st.session_state["sim_live_instance"] = instance_name
-        st.session_state["sim_interrupt_q"] = InterruptQueue()
+def _ensure_walk_lane(instance_name: str, *, lane: str, label: str,
+                      scheduled: list[tuple[int, str]] | None = None) -> str:
+    """Create/reset a lane's walk state and return the fork to play
+    (spec A3: ONE bootstrapping helper for BOTH lanes — DRY).
+
+    Runs at mode entry EVEN when the lane is idle (a fresh render must
+    not fork off a walk — only a Resume press starts one). ``lane``
+    prefixes every private key (sim_live_* / sim_scripted_*); the two
+    lanes differ only in the interrupt queue they own (Scheduled for
+    the timeline file, plain for typed input) and the fork label.
+    """
+    import streamlit as st
+
+    from coe.simulator.live import InterruptQueue, ScheduledInterruptQueue
+
+    st.session_state.setdefault(f"sim_{lane}_complete", False)
+
+    active_key, instance_key = f"sim_{lane}_active", f"sim_{lane}_instance"
+    if (st.session_state.get(active_key) is None
+            or st.session_state.get(instance_key) != instance_name):
+        st.session_state[instance_key] = instance_name
+        if scheduled:
+            queue = ScheduledInterruptQueue(scheduled)
+        else:
+            queue = InterruptQueue()
+        st.session_state[f"sim_{lane}_interrupt_q"] = queue
         st.session_state["sim_seen"] = set()
-        st.session_state["sim_feed_live"] = []
-        st.session_state["sim_live_clock"] = 0
-        st.session_state["sim_complete"] = False
-        st.session_state["sim_live_paused"] = False
+        st.session_state[f"sim_feed_{lane}"] = []
+        st.session_state[f"sim_{lane}_clock"] = 0
+        st.session_state[f"sim_{lane}_complete"] = False
+        st.session_state[f"sim_{lane}_paused"] = False
+        st.session_state[f"sim_{lane}_paused"] = False
         # a fresh day must not inherit a stale running flag (or it would
         # auto-walk before any Resume press)
-        if st.session_state.get("sim_running_lane") == "live":
+        if st.session_state.get("sim_running_lane") == lane:
             st.session_state["sim_running"] = False
             st.session_state["sim_running_lane"] = None
         try:
-            active = _fork_or_default(instance_name, "live")
+            active = _fork_or_default(instance_name, label)
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
-        st.session_state["sim_live_active"] = active
-        st.session_state["sim_live_before_entries"] = \
+        st.session_state[active_key] = active
+        st.session_state[f"sim_{lane}_before_entries"] = \
             _fetch_active_entries(active)
-    return st.session_state["sim_live_active"]
+    return st.session_state[active_key]
 
 
-def _render_live(instance_name: str, llm_client_factory, speed) -> None:
-    """Live-day walk (spec §6) — caller has validated run/pause state.
+def _render_live(instance_name: str, llm_client_factory, speed,
+                 *, lane: str = "live") -> None:
+    """Lane walk (spec §6 / A3) — caller has validated run/pause state.
+    ONE walker-render for BOTH lanes: all private state keys are
+    ``sim_{lane}_*``; the live lane passes lane="live", the scripted
+    lane calls the SAME function with its own fork + scheduled queue.
 
     Self-driving: instant = the whole day in ONE render pass; paced =
     ONE chunk per rerender with ``st.rerun()`` self-advancement
@@ -380,9 +364,9 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
 
     from coe.simulator.live import LiveDayError, live_day
 
-    active = st.session_state["sim_live_active"]
+    active = st.session_state[f"sim_{lane}_active"]
     st.session_state["sim_running"] = True
-    st.session_state["sim_running_lane"] = "live"
+    st.session_state["sim_running_lane"] = lane
 
     # chat capture moved to render()'s live branch (TREE-STABLE: the
     # input must be present in EVERY state, not only mid-walk).
@@ -401,21 +385,23 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
             # line's _board_state_line (via _feed_line) so the COMMITTED
             # line reads post-commit state.
             st.session_state["sim_state_memo"] = {}
-        st.session_state["sim_feed_live"].append(_feed_line(chunk, active))
-        st.session_state["sim_live_clock"] = chunk["t"]
+        st.session_state[f"sim_feed_{lane}"].append(
+            _feed_line(chunk, active))
+        st.session_state[f"sim_{lane}_clock"] = chunk["t"]
 
     terminal = False
     rerender = False
     gen = live_day(active, speed="instant",
                    llm_client_factory=llm_client_factory,
-                   start_clock=st.session_state["sim_live_clock"],
-                   interrupt_queue=st.session_state["sim_interrupt_q"])
+                   start_clock=st.session_state[f"sim_{lane}_clock"],
+                   interrupt_queue=st.session_state[
+                       f"sim_{lane}_interrupt_q"])
     try:
         chunk = next(gen, None)
         while chunk is not None:
             _record(chunk)
             if chunk["event"] == "recovery_start":
-                _paint_idle_feed("live", None)   # paint BEFORE the solve
+                _paint_idle_feed(lane, None)   # paint BEFORE the solve
             if chunk["event"] == "day_end":
                 terminal = True
                 break
@@ -441,18 +427,19 @@ def _render_live(instance_name: str, llm_client_factory, speed) -> None:
     # full history at day end, tail while the walk runs.
     if terminal:
         # refresh the board ONE more time from the final active version
-        _paint_board(active, st.session_state["sim_live_clock"])
-        if st.session_state.get("sim_live_before_entries"):
+        _paint_board(active, st.session_state[f"sim_{lane}_clock"])
+        if st.session_state.get(f"sim_{lane}_before_entries"):
             _render_diff(active,
-                         st.session_state["sim_live_before_entries"])
+                         st.session_state[
+                             f"sim_{lane}_before_entries"])
     _paint_idle_feed(
-        "live",
+        lane,
         "Day complete. Select a new instance to replay."
         if terminal else None, full=terminal)
     if terminal:
         st.session_state["sim_running"] = False
         st.session_state["sim_running_lane"] = None
-        st.session_state["sim_complete"] = True
+        st.session_state[f"sim_{lane}_complete"] = True
     elif rerender:
         _time.sleep(min(60.0 / max(int(speed), 1), 10.0))
         st.rerun()
@@ -464,7 +451,6 @@ def render() -> None:
     import streamlit as st
     from streamlit.errors import StreamlitAPIException
 
-    from coe.simulator.engine import walk_timeline
     from coe.simulator.timeline import TimelineError, load_timeline
 
     instance_name: str | None = st.session_state.get("instance")
@@ -474,15 +460,18 @@ def render() -> None:
 
     # --- session-state contract ------------------------------------------
     for key, default in (
-        ("sim_last_idx", 0), ("sim_paused", False),
         ("sim_running", False), ("sim_running_lane", None),
-        ("sim_clock", 0), ("sim_total", 0),
-        ("sim_active_instance", None), ("sim_before_entries", None),
         ("sim_feed_live", []), ("sim_feed_scripted", []),
-        ("sim_mode", "live"), ("sim_interrupt_q", None),
+        ("sim_mode", "live"),
         ("sim_seen", set()),
         ("sim_live_active", None), ("sim_live_clock", 0),
-        ("sim_live_paused", False), ("sim_complete", False),
+        ("sim_live_paused", False), ("sim_live_complete", False),
+        ("sim_scripted_complete", False),
+        ("sim_scripted_active", None), ("sim_scripted_clock", 0),
+        ("sim_scripted_paused", False),
+        ("sim_scripted_interrupt_q", None),
+        ("sim_scripted_before_entries", None),
+        ("sim_scripted_instance", None),
     ):
         st.session_state.setdefault(key, default)
 
@@ -531,13 +520,10 @@ def render() -> None:
 
     if st.session_state["sim_mode"] == "live":
         # TREE-STABLE live lane: the following element sequence is the
-        # SAME in every state — [chat_input][log painter]. No conditional
-        # element may appear above the log (they shift the log's element
-        # path per state and Streamlit's positional reconcile then leaves
-        # a ghost copy of the box — double-log bug 2026-09-16). Status
-        # text rides in the painter's caption slot instead of st.info /
-        # extra st.caption elements.
-        if st.session_state["sim_complete"]:
+        # SAME in every state — [hero metric][board][chat][log]. No
+        # conditional element may appear above/between (positional
+        # reconcile leaves ghost copies otherwise — 2026-09-16 bug).
+        if st.session_state["sim_live_complete"]:
             # board persists on completed rerenders too (option A gap
             # fix: the early return used to skip the gantt slot, so the
             # board vanished the moment sim_complete flipped) — the
@@ -550,7 +536,8 @@ def render() -> None:
                              "Day complete. Select a new instance to replay.",
                              full=True)
             return
-        active_lane = _ensure_live_lane(instance_name)
+        active_lane = _ensure_walk_lane(instance_name, lane="live",
+                                        label="live")
 
         # Sidebar Run/Pause mirroring the scripted lane (spec §3 step 5).
         # sim_live_paused is live-lane-owned (the scripted sim_paused key
@@ -564,30 +551,31 @@ def render() -> None:
             and st.session_state.get("sim_running_lane") == "live")
         run_pressed = (
             col_run.button(
-                "Run" if st.session_state["sim_complete"] else "Resume",
+                "Run" if st.session_state["sim_live_complete"] else "Resume",
                 type="primary", key="sim_live_run",
-                disabled=st.session_state["sim_complete"])
+                disabled=st.session_state["sim_live_complete"])
             or bool(st.session_state.pop("sim_run_pressed", False)))
         pause_pressed = col_step.button(
             "Pause", key="sim_live_pause",
             disabled=not live_running
             or live_paused or speed == "instant"
-            or st.session_state["sim_complete"])
+            or st.session_state["sim_live_complete"])
 
         # §6 chat input — ALWAYS the next element after the sidebar
         # controls, in EVERY state (fresh/paused/running/complete) so the
         # log box keeps one stable element path. A typed submission is
         # queued and the walk reruns; the staged key is the test seam.
-        staged = st.session_state.pop("sim_chat_text", None)
+        _render_day(st.session_state["sim_live_clock"])
         _paint_board(active_lane, st.session_state["sim_live_clock"])
+        staged = st.session_state.pop("sim_chat_text", None)
         chat = st.chat_input("Describe a disruption to inject mid-flight…",
                              key="sim_live_chat")
         # Push BOTH (staged first, then typed) — the queue is a deque
         # with ordered resolution; never drop a typed submission.
         if staged:
-            st.session_state["sim_interrupt_q"].push(staged)
+            st.session_state["sim_live_interrupt_q"].push(staged)
         if chat:
-            st.session_state["sim_interrupt_q"].push(chat)
+            st.session_state["sim_live_interrupt_q"].push(chat)
 
         if pause_pressed:
             st.session_state["sim_live_paused"] = True
@@ -613,7 +601,12 @@ def render() -> None:
             _paint_idle_feed("live", "Press Resume to start the live day.")
         return
 
-    # --- timeline source ---------------------------------------------------
+    # === SCRIPTED REPLAY (spec A3 §11): the live walker, scheduled ===
+    # DRY: the scripted branch is the SAME code path as the live branch —
+    # one walker (`live_day` via `_render_live`), one painter, one log —
+    # with the timeline's authored events as SCHEDULED interrupts instead
+    # of typed chat. The only interface difference: no chat box here (the
+    # timeline import is that lane's disruption input, in the sidebar).
     manual_entry = "sim_script" in st.session_state
     if manual_entry:
         script_path = st.session_state["sim_script"]
@@ -631,347 +624,64 @@ def render() -> None:
     try:
         tl = load_timeline(script_path)
     except (TimelineError, ValidationError) as exc:
-        # Deviation vs brief: pydantic schema violations surface as
-        # ValidationError, not TimelineError — both must exit cleanly
-        # (same deviation as the CLI).
         st.error(f"Timeline rejected: {exc}")
         st.stop()
     if not tl.events:
         st.error(f"Timeline '{tl.name}' has no events.")
         st.stop()
 
-    # auto_recover override (spec amendment 2026-09-13): the toggle wins
-    # over the timeline field when present; reset when the script changes
-    # (same reset-on-script-change pattern as sim_script/sim_speed).
-    if st.session_state.get("sim_auto_recover_script") != tl.name:
-        st.session_state.pop("sim_auto_recover", None)
-    tl.auto_recover = st.sidebar.toggle(
-        "Auto-recover on every structured disruption",
-        key="sim_auto_recover", value=tl.auto_recover,
-        help="On = every structured disruption event is followed by a "
-             "full recovery solve. Off = facts only (narrative steps "
-             "still trigger solves).")
-    st.session_state["sim_auto_recover_script"] = tl.name
+    if st.session_state["sim_scripted_complete"]:
+        _render_day(st.session_state["sim_scripted_clock"])
+        _paint_board(st.session_state["sim_scripted_active"],
+                     st.session_state["sim_scripted_clock"])
+        _paint_idle_feed(
+            "scripted",
+            "Day complete. Select a new instance to replay.", full=True)
+        return
 
-    st.session_state["sim_total"] = len(tl.events)
-    total = len(tl.events)
-    finished = st.session_state["sim_last_idx"] >= total
-    # Lane-owned running flag (see live lane): a sim_running left set by
-    # the live lane must not auto-drive the scripted walk against a
-    # stale/None sim_active_instance.
+    active_lane = _ensure_walk_lane(instance_name, lane="scripted",
+                                    label=tl.name,
+                                    scheduled=_event_schedule(tl))
+
+    # Sidebar Run/Pause — the live branch's same two-column controls.
+    col_run, col_step = st.sidebar.columns(2)
+    scripted_paused = st.session_state["sim_scripted_paused"]
     scripted_running = (
         st.session_state["sim_running"]
         and st.session_state.get("sim_running_lane") == "scripted")
+    run_pressed = (
+        col_run.button(
+            "Run" if st.session_state["sim_scripted_complete"] else "Resume",
+            type="primary", key="sim_scripted_run",
+            disabled=st.session_state["sim_scripted_complete"])
+        or bool(st.session_state.pop("sim_run_pressed", False)))
+    pause_pressed = col_step.button(
+        "Pause", key="sim_pause",
+        disabled=not scripted_running
+        or scripted_paused or speed == "instant"
+        or st.session_state["sim_scripted_complete"])
 
-    # --- sidebar controls (browser flow; manual_entry auto-runs below) -----
-    if not manual_entry:
-        col_run, col_step = st.sidebar.columns(2)
-        run_pressed = col_run.button(
-            "Run" if finished else "Resume", type="primary",
-            key="sim_run")
-        pause_pressed = col_step.button(
-            "Pause", key="sim_pause",
-            disabled=not scripted_running
-            or st.session_state["sim_paused"])
+    # tree-stable board paint at the walker's own clock (the hero metric
+    # above comes from the same minute).
+    _render_day(st.session_state["sim_scripted_clock"])
+    _paint_board(active_lane, st.session_state["sim_scripted_clock"])
 
-        if pause_pressed:
-            st.session_state["sim_paused"] = True
-            st.info("Playback paused. Press Resume to continue.")
-            # full history; run ends NORMALLY — st.stop() after painting
-            # orphans this run's elements (double-log bug 2026-09-16)
-            _paint_idle_feed("scripted", None, full=True)
-            return
-    else:
-        run_pressed = True
-        pause_pressed = False
-
-    # Clear the pause BEFORE computing start_run: otherwise a paused run
-    # can never resume (start_run was gated on sim_paused staying True).
-    if run_pressed:
-        st.session_state["sim_paused"] = False
-    start_run = run_pressed
-    if start_run:
-        active_prev = st.session_state["sim_active_instance"]
-        if finished or active_prev is None:
-            # Pre-flight: only narrative steps need an active baseline ON
-            # THE SOURCE (the fork inherits it); structured-only scripts
-            # work baseline-free (ingest + projector are self-sufficient).
-            missing_baseline = (
-                any(ev.kind == "NARRATIVE" for ev in tl.events)
-                and not _active_exists(instance_name))
-            if missing_baseline:
-                st.error(
-                    f"`{instance_name}` has no active schedule — run "
-                    f"`uv run python -m coe.cli solve baseline --instance "
-                    f"{instance_name}` first (every narrative event needs "
-                    "a baseline to freeze from, §4.4).")
-                st.stop()
-            try:
-                active = _fork_or_default(instance_name, tl.name)
-            except ValueError as exc:
-                st.error(str(exc))
-                st.stop()
-            st.session_state["sim_active_instance"] = active
-            st.session_state["sim_last_idx"] = 0
-            st.session_state["sim_clock"] = 0
-            st.session_state["sim_display_t"] = 0
-            st.session_state.pop("sim_display", None)
-            st.session_state["sim_feed_scripted"] = []
-            st.session_state["sim_seen"] = set()   # a second day repaints
-            st.session_state["sim_before_entries"] = \
-                _fetch_active_entries(active)
-        st.session_state["sim_running"] = True
-        st.session_state["sim_running_lane"] = "scripted"
-
-    _render_idle(tl)
-    _render_day()
-
-    # Recompute AFTER the start_run block: a fresh Run press just set
-    # sim_running/sim_running_lane above.
-    running = (st.session_state["sim_running"]
-               and st.session_state.get("sim_running_lane") == "scripted")
-    paused = st.session_state["sim_paused"]
-    active = st.session_state["sim_active_instance"]
-
-    # FINAL-REVIEW FIX 1 (2026-09-19): the paced sweep advance happens
-    # BEFORE the single board paint — one board stanza per pass, carrying
-    # the CURRENT interpolated minute. The old order painted the board
-    # with the previous pass's sim_display_t here and repainted inside
-    # the sweep branch (two stacked boards, top stale by one dwell).
-    disp_t = None
-    sweep_target = None
-    dwell = None
-    if (active and running and not paused and speed != "instant"):
-        import time
-
-        entries = _fetch_active_entries(active)
-        makespan = max((int(e["end_time"]) for e in entries), default=0)
-        authored = [int(ev.t) for ev in tl.events]
-        last_idx = st.session_state["sim_last_idx"]
-        upcoming = (authored[last_idx] if last_idx < len(authored)
-                    else makespan)
-        sweep_target = min(upcoming, makespan)
-        display = st.session_state.setdefault(
-            "sim_display", DisplayClock(speed=speed))
-        display.prev_t = st.session_state.get("sim_display_t", 0)
-        dwell = min(_walk_paced_seconds(speed), 2.0)
-        now = time.monotonic()
-        display.arm(sweep_target, now)
-        disp_t = display.advance(now + dwell)   # interpolate THIS pass
-        st.session_state["sim_display_t"] = disp_t
-
-    # THE single board paint of the pass (spec §4.3: one chart at one
-    # call site; the sweep advance above made the minute current).
-    if active:
-        _paint_board(
-            active,
-            st.session_state.get(
-                "sim_display_t", st.session_state.get("sim_clock", 0)))
-
-    if not running or paused:
-        # Idle lane: keep the feed visible (paused / completed rerenders).
-        feed = st.session_state["sim_feed_scripted"]
-        if running:
-            _paint_idle_feed("scripted", "Paused — press Run/Resume.",
-                             full=True)
-        elif finished and feed:
-            _paint_idle_feed("scripted", "Day complete.", full=True)
-        elif not feed:
-            _paint_idle_feed("scripted",
-                             "Press Run to start the scripted day.")
-        else:
-            _paint_idle_feed("scripted", None, full=True)
-        return
-
-    before_entries = st.session_state["sim_before_entries"]
-
-    terminal = None
-    # walk-only pass; the log paints through the single surface below
-    if speed == "instant":
-        # Instant walks complete synchronously in ONE render pass —
-        # safe inside a st.status block (no threading; RunManager lesson).
-        for chunk in walk_timeline(
-            tl, instance_name=active, speed="instant",
-            llm_client_factory=llm_client_factory,
-            start_index=st.session_state["sim_last_idx"],
-        ):
-            if chunk["event"] == "done":
-                terminal = chunk
-                break
-            if chunk["event"] == "recovery_start":
-                # Do NOT advance sim_last_idx — the completion chunk
-                # advances it. Surface that this step is live.
-                key = (chunk.get("t"), chunk.get("event"))
-                if key in st.session_state["sim_seen"]:
-                    continue
-                st.session_state["sim_seen"].add(key)
-                st.session_state["sim_feed_scripted"].append(
-                    _board_state_line(
-                        active, chunk["t"],
-                        f"⏳ recovery starting "
-                        f"({'live LLM' if chunk.get('live') else 'auto-fix (no LLM)'}) —"
-                        " this takes minutes (translate + solver floor)…"))
-                _paint_idle_feed("scripted", None)   # paint BEFORE the solve
-
-                continue
-            st.session_state["sim_last_idx"] = chunk["idx"] + 1
-            st.session_state["sim_clock"] = chunk["t"]
-            st.session_state["sim_display_t"] = chunk["t"]
-            key = (chunk.get("t"), chunk.get("event"))
-            if key not in st.session_state["sim_seen"]:
-                st.session_state["sim_seen"].add(key)
-                if chunk["event"] == "recovery":
-                    status = chunk.get("status", "?")
-                    mark = "✓" if status == "COMMITTED" else f"✗ {status}"
-                    if status == "COMMITTED":
-                        # FINAL-REVIEW FIX 2': clear BEFORE the line's
-                        # _board_state_line so the COMMITTED line's
-                        # done/running read the post-commit board.
-                        st.session_state["sim_state_memo"] = {}
-                    st.session_state["sim_feed_scripted"].append(
-                        _board_state_line(
-                            active, chunk["t"],
-                            f"recovery {chunk['kind']} — "
-                            f"{mark}"))
-                else:
-                    st.session_state["sim_feed_scripted"].append(
-                        _board_state_line(
-                            active, chunk["t"],
-                            f"{chunk['event']} "
-                            f"{chunk.get('kind', '')}".rstrip()))
-
-    else:
-        # Paced mode: the DISPLAY clock sweeps (DisplayClock, Task 1)
-        # toward the next authored event minute (or the board horizon).
-        # The advance ran in the prelude above (before the single board
-        # paint — Fix 1); a pass is either a SWEEP pass (display still
-        # short of the target: dwell + self-advance, the board is
-        # already painted) or a TERMINATOR pass (consumes ONE chunk).
-        # Terminators (event chunks) are only consumed once the display
-        # HAS reached the authored minute — events no longer teleport
-        # the board. The chunk-consumption loop below keeps today's
-        # semantics exactly (recovery_start/recovery inline-block,
-        # sim_last_idx, dedup, lane feed, tree-stable paints).
-        if disp_t is not None and disp_t < sweep_target:
-            # Sweep pass: the board painted above at the interpolated
-            # minute IS the pass's single stanza — the terminator waits
-            # until the display is AT the authored event minute (or the
-            # horizon).
-            import time
-
-            _paint_idle_feed("scripted", None)
-            time.sleep(dwell)
-            st.rerun()
-            return
-
-        # Paced mode paths ONE full terminator per auto-rerender,
-        # st.rerun() self-advancement. A fresh generator is created
-        # on every rerender; the engine skips idx < start_index
-        # (already persisted) and runs silently instant — the page
-        # owns the pacing clock via the pause toggle + Run/Resume
-        # buttons. recovery_start / auto_recover chunks NEVER
-        # advance sim_last_idx and never break the loop — the walk
-        # is driven to the next terminator (ingest chunk or
-        # recovery completion) INSIDE this rerender so a narrative
-        # solve finishes inline; the generator is only ever closed
-        # at a yield boundary, never mid-recovery.
-        gen = walk_timeline(tl, instance_name=active, speed="instant",
-                            llm_client_factory=llm_client_factory,
-                            start_index=st.session_state["sim_last_idx"])
-        try:
-            while True:
-                chunk = next(gen, None)
-                if chunk is None:
-                    terminal = {"event": "done", "committed": []}
-                    break
-                if chunk["event"] == "done":
-                    terminal = chunk
-                    break
-                key = (chunk.get("t"), chunk.get("event"))
-                if key in st.session_state["sim_seen"]:
-                    if chunk["event"] in ("ingest", "recovery"):
-                        break
-                    continue
-                st.session_state["sim_seen"].add(key)
-                # sim_clock advances to EVERY chunk's authored t —
-                # recovery chunks too (closes the 330-freeze).
-                st.session_state["sim_clock"] = chunk["t"]
-                if chunk["event"] == "recovery":
-                    status = chunk.get("status", "?")
-                    mark = ("✓ COMMITTED" if status == "COMMITTED"
-                            else f"✗ {status}")
-                    if status == "COMMITTED":
-                        # FINAL-REVIEW FIX 2': clear BEFORE the line's
-                        # _board_state_line (post-commit state numbers).
-                        st.session_state["sim_state_memo"] = {}
-                    line = _board_state_line(
-                        active, chunk["t"],
-                        f"recovery {chunk.get('kind', '')} — {mark}")
-                    st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                    # terminator consumption: the sweep re-arms from
-                    # the authored minute (display jumps to the event).
-                    st.session_state["sim_display_t"] = chunk["t"]
-                elif chunk["event"] == "recovery_start":
-                    who = ("live LLM" if chunk.get("live")
-                           else "auto-fix (no LLM)")
-                    line = _board_state_line(
-                        active, chunk["t"],
-                        f"⏳ recovery starting ({who}) — solving…")
-                elif chunk["event"] == "auto_recover":
-                    line = _board_state_line(active, chunk["t"],
-                                             "auto_recover")
-                else:
-                    line = _board_state_line(
-                        active, chunk["t"],
-                        f"{chunk['event']} "
-                        f"{chunk.get('kind', '')}".rstrip())
-                    st.session_state["sim_last_idx"] = chunk["idx"] + 1
-                    st.session_state["sim_display_t"] = chunk["t"]
-                st.session_state["sim_feed_scripted"].append(line)
-                if chunk["event"] == "recovery_start":
-                    _paint_idle_feed("scripted", None)   # paint BEFORE the solve
-
-                if chunk["event"] not in ("recovery_start",
-                                          "auto_recover"):
-                    break         # terminator → return control
-        finally:
-            try:
-                gen.close()
-            except Exception:
-                pass
-        # auto-advance: one dwell, then a fresh rerender drives the
-        # next slice (Bug 1 dies — no single green button press
-        # needed per event).
-        if terminal is None and not st.session_state.get("sim_paused"):
-            import time
-
-            time.sleep(min(_walk_paced_seconds(speed), 2.0))
-            st.rerun()
-
-    # ONE log surface: painted after the walk in every pass outcome —
-    # full history at day end, tail mid-walk.
-    _paint_idle_feed("scripted", None, full=terminal is not None)
-    if terminal is not None:
+    if pause_pressed:
+        st.session_state["sim_scripted_paused"] = True
         st.session_state["sim_running"] = False
-        st.session_state["sim_last_idx"] = total
-        committed = terminal.get("committed") or []
-        if committed:
-            st.success(f"{len(committed)} recovery version(s) committed.")
-        else:
-            st.info("Day finished — structured events absorbed "
-                    "without a recovery solve.")
-        # Day-end clock (FINAL-REVIEW FIX 2, spec §10.1 AC 8): the
-        # instant path has no DisplayClock, so the display never sweeps
-        # past the last ingest — clamp the terminus to the active
-        # schedule's TRUE makespan; the rail cites the day-end clock.
-        makespan = max((int(e["end_time"])
-                        for e in _fetch_active_entries(active)), default=0)
-        display_t = st.session_state.get("sim_display_t", 0)
-        end_clock = max(st.session_state["sim_clock"], display_t, makespan)
-        st.session_state["sim_display_t"] = end_clock
-        # terminal board repaint at the day-end clock — settles the
-        # stale terminal-pass paint on both paths (live-lane parity).
-        _paint_board(active, end_clock)
-        st.caption(_rail_line(active, end_clock))
-        if before_entries:
-            _render_diff(active, before_entries)
+        st.session_state["sim_running_lane"] = None
+        _paint_idle_feed("scripted", "Paused — press Resume.", full=True)
+        return
+    if run_pressed:
+        st.session_state["sim_scripted_paused"] = False
+        _render_live(active_lane, llm_client_factory, speed,
+                     lane="scripted")
+    elif scripted_running:
+        _render_live(active_lane, llm_client_factory, speed,
+                     lane="scripted")
+    elif scripted_paused:
+        _paint_idle_feed("scripted", "Paused — press Resume.", full=True)
+    else:
+        _paint_idle_feed("scripted",
+                         "Press Run to start the scripted day.")
+    return

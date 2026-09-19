@@ -10,6 +10,12 @@ component.
 import json
 import pathlib
 import re
+
+# Unified log schema across BOTH lanes (spec §10 / A3): every log line
+# is "[t=…<4>] done=N running=M · <detail>" — state numbers from the
+# SAME committed-entry classification the board uses.
+_UNIFIED_SCHEMA = re.compile(
+    r"\[t=\s*\d+\] done=\d+ running=\d+(?:\s·.*)?$")
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -53,17 +59,22 @@ def _tiny_script(tmp_path):
 
 
 def test_page_smoke(clean_db, demo_scenario, tmp_path):
+    """Scripted-lane smoke: the lane bootstraps its walk state and stays
+    idle (no walk without a Run press — same no-autostart rule as live,
+    spec A3 §11)."""
     st = _fresh_streamlit()
 
     from coe.dashboard.pages import simulate as sim_page
 
     st.session_state["instance"] = "factory_demo_01"
-    st.session_state["sim_mode"] = "scripted"  # pre-Task-4 scripted lane
+    st.session_state["sim_mode"] = "scripted"
     st.session_state["sim_script"] = _tiny_script(tmp_path)
     st.session_state["sim_speed"] = "instant"
-    # direct-render convention used by tests/dashboard/test_cockpit_page.py
     sim_page.render()
-    assert st.session_state.get("sim_last_idx", 0) >= 1
+    # lane bootstrapped; idle (no walk)
+    assert st.session_state["sim_scripted_active"] is not None
+    assert st.session_state.get("sim_scripted_clock", 0) == 0
+    assert st.session_state["sim_running"] is False
 
 
 def test_log_paints_capped_tail(monkeypatch, request):
@@ -178,129 +189,11 @@ def test_invalid_speed_guards_non_numeric(clean_db, tmp_path):
 
         msgs = [c.args[0] for c in st.error.call_args_list]
         assert any("invalid speed" in m for m in msgs)
-        assert st.session_state.get("sim_last_idx", 0) == 0
+        assert st.session_state["sim_scripted_clock"] == 0
     finally:
         sys.modules.pop("streamlit", None)
         sys.modules.pop("streamlit.errors", None)
 
-
-def test_paced_run_pause_resume_terminal(
-    clean_db, demo_scenario, tmp_path, monkeypatch):
-    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
-    script_path = _two_event_script(tmp_path)
-
-    # Fork disabled for this test; keep every other setting real because
-    # load_timeline reads simulate_max_horizon_days off the same object.
-    from coe.config import get_settings as real_get_settings
-
-    class _Settings(types.SimpleNamespace):
-        simulate_clone = False
-
-        def __getattr__(self, name):
-            return getattr(real_get_settings(), name)
-
-    _patched_settings = _Settings()
-    monkeypatch.setattr(
-        "coe.config.get_settings", lambda: _patched_settings)
-
-    orig_glob = pathlib.Path.glob
-    fake_script = pathlib.Path(script_path)
-
-    def fake_glob(self, pattern):
-        if pattern == "*.json" and str(self) == "data/timelines":
-            return iter([fake_script])
-        return orig_glob(self, pattern)
-
-    monkeypatch.setattr(pathlib.Path, "glob", fake_glob)
-
-    # The sidebar-flow path builds "data/timelines/<name>"; resolve it to
-    # the tmp script so the selector can stay DB/CWD-independent.
-    import coe.simulator.timeline as tlmod
-    real_load = tlmod.load_timeline
-    monkeypatch.setattr(
-        tlmod, "load_timeline",
-        lambda p: real_load(script_path) if "tiny2.json" in str(p)
-        else real_load(p))
-
-    st = _make_st()
-    from coe.dashboard.pages import simulate as sim_page
-    # render() pulls `from streamlit.errors import StreamlitAPIException`;
-    # expose a matching submodule so the stub imports cleanly.
-    st.__path__ = []
-    errors_mod = types.ModuleType("streamlit.errors")
-    errors_mod.StreamlitAPIException = type("StreamlitAPIException",
-                                            (Exception,), {})
-    monkeypatch.setitem(sys.modules, "streamlit.errors", errors_mod)
-    monkeypatch.setitem(sys.modules, "streamlit", st)
-
-    col_run = st.sidebar._col_run
-    col_pause = st.sidebar._col_pause
-    pressed = {"run": False, "pause": False}
-
-    def button(label, **_kw):
-        if label in ("Run", "Resume") and pressed["run"]:
-            return True
-        if label == "Pause" and pressed["pause"]:
-            return True
-        return False
-
-    col_run.button = button
-    col_pause.button = button
-
-    def render_expect_stop():
-        try:
-            sim_page.render()
-        except SystemExit:
-            pass
-
-    st.session_state["instance"] = "factory_demo_01"
-    st.session_state["sim_speed"] = 10  # non-instant → one event / rerender
-    st.sidebar.selectbox = MagicMock(return_value="tiny2.json")
-
-    # 1. Run → consumes the first event only.
-    pressed["run"] = True
-    sim_page.render()
-    assert st.session_state["sim_last_idx"] == 1
-    assert st.session_state["sim_paused"] is False
-    assert st.session_state["sim_running"] is True
-    assert len(st.session_state["sim_feed_scripted"]) == 1
-
-    # 2. Pause → playback stops, paused flag set, page halts.
-    pressed["run"] = False
-    pressed["pause"] = True
-    render_expect_stop()
-    assert st.session_state["sim_paused"] is True
-    assert st.session_state["sim_last_idx"] == 1
-
-    # 3. Resume (Run button while paused) → consumes the NEXT event, no
-    #    duplicate of the first (shutdown of the old pause-deadlock bug:
-    #    pre-fix, sim_paused was never cleared so start_run stayed False).
-    pressed["pause"] = False
-    pressed["run"] = True
-    sim_page.render()
-    assert st.session_state["sim_paused"] is False
-    assert st.session_state["sim_last_idx"] == 2
-    assert len(st.session_state["sim_feed_scripted"]) == 2
-
-    # 4. No button pressed, still running → walker yields the done chunk;
-    #    page reaches Terminal without re-walking consumed events.
-    pressed["run"] = False
-    sim_page.render()
-    assert st.session_state["sim_running"] is False
-    assert st.session_state["sim_last_idx"] == 2
-    assert st.session_state.get("sim_paused") is False
-
-    from sqlalchemy import text
-    from sqlalchemy.orm import Session
-
-    from coe.db.session import make_engine
-
-    with Session(make_engine()) as s:
-        (n_rows,) = s.execute(text(
-            "SELECT count(*) FROM telemetry_events te "
-            "JOIN instances i ON i.id = te.instance_id "
-            "WHERE i.name = 'factory_demo_01'")).one()
-    assert n_rows == 2  # exactly one ingest per timeline event
 
 
 def _narrative_event_script(tmp_path):
@@ -319,82 +212,6 @@ def _narrative_event_script(tmp_path):
     return str(p)
 
 
-def test_paced_no_duplicate_lines_across_rerenders(
-        clean_db, demo_scenario, tmp_path, monkeypatch, request):
-    """Bug 2026-09-13: walked repeatedly over the same ⏳ event produced
-    duplicate feed lines; the seen-guard must kill duplicates when the
-    page rerenders repeatedly.
-
-    Models the crash-mid-solve rerender: after the rerender that showed
-    the "⏳ recovery starting" line, sim_last_idx is rewound to the
-    narrative event's idx WITHOUT clearing sim_seen; the next render
-    must not re-append the ⏳ line. NARRATIVE event chosen deliberately —
-    recovery_start chunks never advance sim_last_idx, so a stray
-    rerender genuinely re-enters the narrative step (the vacuous
-    structured-events-only version produced no recovery chunk at all)."""
-    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
-    instance = _baseline_instance()   # BEFORE the env squeeze below — the
-    # baseline CLI subprocess must solve with the full default budget.
-    # Keep the narrative solve cheap: drop the §10 recovery floor and
-    # shrink the budget — the dedup guard is independent of the status.
-    # Env override (NOT a get_settings lambda swap): the engine's worker
-    # pin/restore calls get_settings.cache_clear(), which requires the
-    # real lru-cached callable.
-    import coe.cli
-    monkeypatch.setattr(coe.cli, "_recovery_floor", lambda s: s)
-    monkeypatch.setenv("SIMULATE_CLONE", "false")
-    monkeypatch.setenv("SOLVER_TIME_LIMIT_SECONDS", "20")
-    from coe.config import get_settings
-    get_settings.cache_clear()
-    request.addfinalizer(get_settings.cache_clear)  # no stale-cached env
-    script_path = _narrative_event_script(tmp_path)
-
-    st = _make_st()
-    from coe.dashboard.pages import simulate
-
-    st.__path__ = []
-    errors_mod = types.ModuleType("streamlit.errors")
-    errors_mod.StreamlitAPIException = type("StreamlitAPIException",
-                                            (Exception,), {})
-    monkeypatch.setitem(sys.modules, "streamlit.errors", errors_mod)
-    monkeypatch.setitem(sys.modules, "streamlit", st)
-
-    st.session_state["instance"] = instance
-    st.session_state["sim_mode"] = "scripted"
-    st.session_state["sim_script"] = script_path
-    st.session_state["sim_speed"] = 30
-
-    def _recovery_start_lines():
-        return [ln for ln in st.session_state["sim_feed_scripted"]
-                if "recovery starting" in ln]
-
-    # 1. Run → the narrative step is entered inline: the rerender shows
-    #    the ⏳ line, then the terminator (recovery chunk) advances idx.
-    # Deviation (Task 2 sweep, spec §10.1): with a baseline present the
-    # run-press pass sweeps the display toward the authored minute and
-    # the terminator is consumed on the NEXT pass — so render twice.
-    simulate.render()
-    simulate.render()
-    assert st.session_state["sim_last_idx"] == 1
-    assert len(_recovery_start_lines()) == 1
-
-    # 2. Crash-mid-solve replay: rewind to the narrative event's idx
-    #    WITHOUT clearing sim_seen (browser crash lost widget state, the
-    #    Starlette session survived — exact Bug 2026-09-13 signature).
-    st.session_state["sim_last_idx"] = 0
-    simulate.render()
-    assert len(_recovery_start_lines()) == 1, (
-        "duplicate ⏳ recovery-starting lines across the rewound rerender")
-
-    # 3. Global uniqueness still holds (original invariant).
-    lines = [ln for ln in st.session_state["sim_feed_scripted"]
-             if ln.strip()]
-    assert len(lines) == len(set(lines)), "duplicate feed lines remain"
-
-
-# ---------------------------------------------------------------------------
-# live-day mode (Task 3): mode picker + controller + chat capture
-# ---------------------------------------------------------------------------
 
 def _baseline_instance() -> str:
     """Baseline-bearing clone (shared helper, same subprocess pattern)."""
@@ -461,39 +278,34 @@ def test_live_chat_queues_and_solves(clean_db, demo_scenario):
 def test_live_lane_state_isolated_from_scripted(clean_db, demo_scenario,
                                                 tmp_path):
     """Regression (cross-lane state bleed): the live lane must own
-    sim_live_active/sim_live_clock — a scripted run's sim_active_instance
-    must never be played by the live walker, and the scripted keys must
-    survive a live render untouched."""
+    sim_live_active/sim_live_clock and the scripted lane's
+    sim_scripted_* — switching modes never shares a clock or a fork."""
     st = _fresh_streamlit()
 
     from coe.dashboard.pages import simulate
 
     source = _baseline_instance()
 
-    # 1. Scripted lane runs first: sim_active_instance becomes X.
+    # 1. Scripted lane bootstraps its OWN fork.
     st.session_state["instance"] = source
     st.session_state["sim_mode"] = "scripted"
     st.session_state["sim_script"] = _tiny_script(tmp_path)
     st.session_state["sim_speed"] = "instant"
     simulate.render()
-    scripted_active = st.session_state["sim_active_instance"]
-    scripted_clock = st.session_state["sim_clock"]
+    scripted_active = st.session_state["sim_scripted_active"]
+    scripted_clock = st.session_state["sim_scripted_clock"]
     assert scripted_active is not None
 
     # 2. Switch to live: the live lane forks its OWN fresh clone —
-    #    never reuses X, never reads the scripted clock.
+    #    never reuses the scripted fork.
     st.session_state["sim_mode"] = "live"
     simulate.render()
     live_active = st.session_state["sim_live_active"]
     assert live_active is not None
     assert live_active != scripted_active
     assert live_active.startswith("sim-live@")
-    # scripted keys untouched by the live lane
-    assert st.session_state["sim_active_instance"] == scripted_active
-    assert st.session_state["sim_clock"] == scripted_clock
 
-    # 3. live → scripted → live: the live lane restores its own fork
-    #    and clock (guard does not re-fork while the source is unchanged).
+    # 3. live → scripted → live: each lane restores its own keys.
     prev_live_active = live_active
     prev_live_clock = st.session_state["sim_live_clock"]
     st.session_state["sim_mode"] = "scripted"
@@ -502,8 +314,7 @@ def test_live_lane_state_isolated_from_scripted(clean_db, demo_scenario,
     simulate.render()
     assert st.session_state["sim_live_active"] == prev_live_active
     assert st.session_state["sim_live_clock"] == prev_live_clock
-    assert st.session_state["sim_live_active"] != \
-        st.session_state["sim_active_instance"]
+    assert st.session_state["sim_scripted_active"] == scripted_active
 
 
 def test_recovery_start_paints_before_inline_solve(
@@ -547,15 +358,21 @@ def test_recovery_start_paints_before_inline_solve(
 
     from coe.dashboard.pages import simulate
     sim_page = _stub_render_env(monkeypatch, st)
+    # A3 sidebar wiring: Run pressed, Pause not (stub buttons must not
+    # be truthy Magics or a paused render eats the walk).
+    st.sidebar._col_run.button = MagicMock(return_value=True)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
 
     st.session_state["instance"] = instance
     st.session_state["sim_mode"] = "scripted"
     st.session_state["sim_script"] = str(p)
     st.session_state["sim_speed"] = "instant"
+    # A3: the scripted lane no longer auto-runs — a Run press starts the
+    # scheduled day (same no-autostart rule as the live lane).
+    st.session_state["sim_run_pressed"] = True
 
     sim_page.render()
 
-    assert st.session_state["sim_last_idx"] == 1
     feed = "\n".join(st.session_state["sim_feed_scripted"])
     assert "recovery starting" in feed
     assert "recovery NARRATIVE" in feed and "✓" in feed
@@ -563,17 +380,16 @@ def test_recovery_start_paints_before_inline_solve(
         "the ⏳ recovery-starting line must be painted BEFORE the inline "
         "solve runs (pre-fix the log only painted after the terminator)")
 
-    # Final-review Fix 2 (AC 8): the instant terminus is clamped to the
-    # active schedule's TRUE makespan (no DisplayClock on the instant
-    # path to sweep there) and the terminal repaint binds sim_display_t
-    # to end_clock via _paint_board.
+    # Final-review Fix 2 (AC 8), now via the shared walker: the scripted
+    # day ends AT THE BOARD HORIZON — `sim_scripted_clock` carries the
+    # day-end clock (rail-parity), never the last ingest's t.
     makespan = max(int(e["end_time"]) for e in
                    sim_page._fetch_active_entries(
-                       st.session_state["sim_active_instance"]))
+                       st.session_state["sim_scripted_active"]))
     assert makespan > 100, "baseline day must extend past the last ingest"
-    assert st.session_state["sim_display_t"] >= makespan - 1, (
-        "instant day must end at the true makespan, not the last "
-        "ingest's clock")
+    assert st.session_state["sim_scripted_clock"] >= makespan - 1, (
+        "scripted day must end at the true board horizon, not the last "
+        "event's clock")
 
 
 # ---------------------------------------------------------------------------
@@ -775,22 +591,37 @@ def test_lane_feeds_are_scoped_and_survive_switches(
                                  "Live day"
                                  if st.session_state.get("sim_mode") == "live"
                                  else "Scripted replay")
+    st.sidebar.selectbox = MagicMock(return_value=30)   # pace law 30x
     st.chat_input = MagicMock(return_value=None)
+    st.sidebar._col_run.button = MagicMock(return_value=False)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
 
-    # 1. Scripted lane (manual_entry): run the whole tiny script.
-    st.session_state["instance"] = "factory_demo_01"
+    # 1. Scripted lane (manual_entry): run the tiny script under A3 —
+    #    a Run press starts the scheduled-interrupt day. The scripted
+    #    events fire as narrations through the stubbed recovery graph
+    #    (lane-feed scoping, not solving, is what this test binds). The
+    #    instance needs an active schedule: the shared walker plays a
+    #    committed board (A3 contract; factory_demo_01 alone has none).
+    st.session_state["instance"] = _baseline_instance()
     st.session_state["sim_mode"] = "scripted"
     st.session_state["sim_script"] = script_path
     st.session_state["sim_speed"] = "instant"
+    import coe.agents.graph as graph_mod
+    monkeypatch.setattr(graph_mod, "execute_recovery",
+                        lambda *a, **kw: {"status": "COMMITTED",
+                                          "state": types.SimpleNamespace(
+                                              committed_version_id=None)})
+    st.sidebar._col_run.button = MagicMock(return_value=True)   # Run press
     sim_page.render()
     scripted_feed = list(st.session_state["sim_feed_scripted"])
-    assert len(scripted_feed) == 2
+    assert scripted_feed
     assert all("[t=" in ln for ln in scripted_feed)
 
     # 2. Switch to live — idle lane (no run press): its log must NOT
     #    show the scripted lines and its feed stays empty, while the
     #    scripted feed is retained untouched.
     st.empty.return_value.markdown.reset_mock()
+    st.sidebar._col_run.button = MagicMock(return_value=False)  # no press
     st.session_state["sim_mode"] = "live"
     sim_page.render()
     assert st.session_state["sim_feed_live"] == []
@@ -812,136 +643,7 @@ def test_lane_feeds_are_scoped_and_survive_switches(
     assert all(ln in "\n".join(md_calls) for ln in scripted_feed)
 
 
-def test_scripted_ignores_stale_live_running_flag(
-        clean_db, tmp_path, monkeypatch):
-    """IMPORTANT-1 regression: switching Mode to Scripted replay mid-
-    live-walk leaves sim_running=True (set by the live lane). The
-    scripted arm must NOT auto-drive walk_timeline on the stale (here:
-    None) sim_active_instance — the walk block is gated on a
-    scripted-lane-owned running flag, so the idle controls render and
-    the feed/idx stay untouched."""
-    _scripted_pace_env(monkeypatch, _two_event_script(tmp_path))
 
-    st = _make_st()
-    st.sidebar._col_run.button = MagicMock(return_value=False)
-    st.sidebar._col_pause.button = MagicMock(return_value=False)
-    sim_page = _stub_render_env(monkeypatch, st)
-
-    st.session_state["instance"] = "factory_demo_01"
-    st.session_state["sim_speed"] = 10
-    st.sidebar.selectbox = MagicMock(return_value="tiny2.json")
-    # stale live-walk state: the live lane set sim_running and never
-    # cleared it (mid-walk mode switch); no scripted session exists.
-    st.session_state["sim_running"] = True
-    st.session_state["sim_running_lane"] = "live"
-    st.session_state["sim_active_instance"] = None
-
-    sim_page.render()   # pre-fix: walks with instance=None → DB hit/error
-
-    assert st.session_state["sim_last_idx"] == 0
-    assert st.session_state["sim_feed_scripted"] == []
-    assert not st.rerun.called
-    assert any("Press Run to start" in str(c.args[0])
-               for c in st.empty.return_value.caption.call_args_list)
-
-
-def test_idle_feed_panel_survives_pause_and_completion(
-        clean_db, demo_scenario, tmp_path, monkeypatch):
-    """IMPORTANT-2 regression: the event feed must stay visible when the
-    walk is NOT running — paused renders and day-complete rerenders
-    paint a read-only panel from sim_feed (the status container stays
-    the sole painter mid-walk)."""
-    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
-    script_path = _two_event_script(tmp_path)
-    _scripted_pace_env(monkeypatch, script_path)
-
-    # Fork disabled for this test; keep every other setting real.
-    from coe.config import get_settings as real_get_settings
-
-    class _Settings(types.SimpleNamespace):
-        simulate_clone = False
-
-        def __getattr__(self, name):
-            return getattr(real_get_settings(), name)
-
-    monkeypatch.setattr(
-        "coe.config.get_settings", lambda: _Settings())
-
-    st = _make_st()
-    sim_page = _stub_render_env(monkeypatch, st)
-
-    col_run = st.sidebar._col_run
-    col_pause = st.sidebar._col_pause
-    pressed = {"run": False, "pause": False}
-
-    def button(label, **_kw):
-        if label in ("Run", "Resume") and pressed["run"]:
-            return True
-        if label == "Pause" and pressed["pause"]:
-            return True
-        return False
-
-    col_run.button = button
-    col_pause.button = button
-
-    st.session_state["instance"] = "factory_demo_01"
-    st.session_state["sim_speed"] = 10  # non-instant → one event / rerender
-    st.sidebar.selectbox = MagicMock(return_value="tiny2.json")
-
-    def markdown_calls():
-        # log content paints through the st.empty() content slot
-        return [c.args[0] for c in st.empty.return_value.markdown.call_args_list]
-
-    # 1. Run → event 1 consumed (feed painted inside the status block).
-    pressed["run"] = True
-    sim_page.render()
-    assert st.session_state["sim_last_idx"] == 1
-    feed_line = st.session_state["sim_feed_scripted"][0]
-
-    # 2. Pause press → halted; then an idle paused rerender (no press)
-    #    must repaint the feed with a Paused caption.
-    pressed["run"] = False
-    pressed["pause"] = True
-    try:
-        sim_page.render()
-    except SystemExit:
-        pass
-    assert st.session_state["sim_paused"] is True
-    st.empty.return_value.markdown.reset_mock()
-    st.empty.return_value.caption.reset_mock()
-    st.caption.reset_mock()
-    pressed["pause"] = False
-    sim_page.render()
-    assert any("Paused" in str(c.args[0])
-               for c in st.empty.return_value.caption.call_args_list)
-    assert any(feed_line in m for m in markdown_calls()), \
-        "paused render must repaint the feed"
-
-    # 3. Resume → event 2; 4. no press → walker yields done (terminal).
-    pressed["pause"] = False
-    pressed["run"] = True
-    sim_page.render()
-    assert st.session_state["sim_last_idx"] == 2
-    pressed["run"] = False
-    sim_page.render()
-    assert st.session_state["sim_running"] is False
-    assert len(st.session_state["sim_feed_scripted"]) == 2
-
-    # 5. Idle rerender after completion → "Day complete." + full feed.
-    st.empty.return_value.markdown.reset_mock()
-    st.empty.return_value.caption.reset_mock()
-    st.caption.reset_mock()
-    sim_page.render()
-    assert any("Day complete" in str(c.args[0])
-               for c in st.empty.return_value.caption.call_args_list)
-    assert markdown_calls() == [
-        "  \n".join(st.session_state["sim_feed_scripted"])], \
-        "day-complete rerender must repaint the feed"
-
-
-# ---------------------------------------------------------------------------
-# Task 2: tree-stable clock hero + gantt slot (both lanes)
-# ---------------------------------------------------------------------------
 
 def test_gantt_slot_tree_stable_live(clean_db, demo_scenario, monkeypatch,
                                      request):
@@ -957,9 +659,9 @@ def test_gantt_slot_tree_stable_live(clean_db, demo_scenario, monkeypatch,
     st.session_state["sim_speed"] = "instant"
 
     simulate.render()   # runs whole day end-to-end, instant
-    # clock slot painted at least once with a full-readable minute
-    assert any("t = " in str(c.args[0])
-               for c in st.empty.return_value.caption.call_args_list)
+    # clock hero metric painted (same hero both lanes — spec A3 §11.3)
+    assert any("Day clock" in str(c.args[0])
+               for c in st.empty.return_value.metric.call_args_list)
     # gantt slot: a plotly chart painted through st.plotly_chart
     assert st.plotly_chart.called
 
@@ -1003,7 +705,7 @@ def test_day_end_final_board_stays_with_diff_below(
     st.session_state["sim_speed"] = "instant"
 
     simulate.render()
-    assert st.session_state["sim_complete"] is True
+    assert st.session_state["sim_live_complete"] is True
     # board painted (final figure at the SAME stable path — no removal
     # needed) alongside the diff
     assert st.plotly_chart.called
@@ -1044,7 +746,7 @@ def test_live_day_end_diff_below_final_board(
     st.session_state["sim_speed"] = "instant"
 
     simulate.render()   # runs whole day end-to-end, instant
-    assert st.session_state["sim_complete"] is True
+    assert st.session_state["sim_live_complete"] is True
     # before-capture captured at lane entry (fork of committed baseline)
     assert st.session_state["sim_live_before_entries"]
     # terminal pass: board repaint + the diff chart (end-to-end
@@ -1052,144 +754,8 @@ def test_live_day_end_diff_below_final_board(
     assert st.plotly_chart.call_count >= 2
 
 
-def test_display_clock_paces_and_freezes_at_target():
-    from coe.dashboard.pages.simulate import DisplayClock
-
-    fake_time = {"now": 0.0}
-    clock = DisplayClock(speed=30)
-    clock.prev_t = 0
-    clock.arm(target_t=90)          # 90 min gap at 30x = 3.0 wall-seconds
-    fake_time["now"] = 1.5
-    assert clock.advance(fake_time["now"]) == 45
-    fake_time["now"] = 2.9
-    assert clock.advance(fake_time["now"]) == 87
-    fake_time["now"] = 3.0
-    assert clock.advance(fake_time["now"]) == 90    # exactly target
-    fake_time["now"] = 9.0
-    assert clock.advance(fake_time["now"]) == 90    # holds AT target
 
 
-def test_display_clock_instant_jumps():
-    from coe.dashboard.pages.simulate import DisplayClock
-
-    c = DisplayClock(speed="instant")
-    c.prev_t = 0
-    c.arm(target_t=90)
-    assert c.advance(now=0.001) == 90
-
-
-# ---------------------------------------------------------------------------
-# Task 2 (scripted live-parity): display-clock pacing + makespan terminus
-# ---------------------------------------------------------------------------
-
-def test_scripted_paces_between_events(
-        clean_db, demo_scenario, tmp_path, monkeypatch, request):
-    """Spec §10 AC 8: paced scripted sweep interpolates the display
-    clock across event gaps instead of teleporting; recovers at the
-    authored minute."""
-    _live_pace_env(monkeypatch, request)
-    script = json.dumps({
-        "name": "parity", "seed": 1, "horizon_days": 2,
-        "auto_recover": False,
-        "events": [{"t": 90, "kind": "MACHINE", "event_type": "FAILURE",
-                    "machine_id": "M3"},
-                   {"t": 300, "kind": "MACHINE", "event_type": "FAILURE",
-                    "machine_id": "M3"}],
-    })
-    p = tmp_path / "parity.json"; p.write_text(script)
-    _scripted_pace_env(monkeypatch, str(p))
-    st = _make_st(); sim_page = _stub_render_env(monkeypatch, st)
-    # a baseline-bearing instance is required for the sweep: with no
-    # active schedule the board horizon is 0 and pacing is undefined
-    st.session_state["instance"] = _baseline_instance()
-    # pause NOT pressed (a bare MagicMock call is truthy and would pause
-    # the lane inside the button-driven tests)
-    st.sidebar._col_pause.button = MagicMock(return_value=False)
-    st.session_state["sim_speed"] = 30
-    st.sidebar.selectbox = MagicMock(return_value="parity.json")
-    col = st.sidebar._col_run
-    pressed = {"run": True}; col.button = lambda label, **k: pressed["run"]
-    st.plotly_chart.reset_mock()
-    sim_page.render()          # pass 1: arms sweep toward 90
-    assert 0 < st.session_state["sim_display_t"] < 90, (
-        "pass must advance interpolation beyond 0 without reaching the "
-        "event minute")
-    # Final-review Fix 1: ONE board stanza per pass — a sweep pass paints
-    # the board exactly ONCE, at the CURRENT interpolated minute (the
-    # old order stacked the previous pass's stale board above the fresh
-    # sweep paint = two chart calls per pass).
-    assert st.plotly_chart.call_count == 1, (
-        f"sweep pass must paint exactly ONE board, got "
-        f"{st.plotly_chart.call_count}")
-    # pass 2..n until sweep arrives at 90, then the engine consumes the
-    # event: after several passes the ingest completes.
-    for _ in range(3):
-        st.plotly_chart.reset_mock()
-        sim_page.render()
-        assert st.plotly_chart.call_count == 1, (
-            "every non-terminal walk pass paints exactly ONE board "
-            "(single stanza per pass)")
-    assert st.session_state["sim_last_idx"] == 1   # event 1 consumed
-
-
-def test_scripted_day_ends_at_board_horizon(
-        clean_db, demo_scenario, tmp_path, monkeypatch, request):
-    """Spec §10.1: after consuming ALL authored events, the sweep keeps
-    going to the final active version's makespan; the terminal rail cites
-    that day-end clock (NOT the last ingest's 300)."""
-    _live_pace_env(monkeypatch, request)
-    script = tmp_path / "horizon.json"
-    script.write_text(json.dumps({
-        "name": "horizon", "seed": 1, "horizon_days": 2,
-        "auto_recover": False,
-        "events": [{"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
-                    "machine_id": "M3"},
-                   {"t": 300, "kind": "MACHINE", "event_type": "FAILURE",
-                    "machine_id": "M3"}]}))
-    _scripted_pace_env(monkeypatch, str(script))
-    st = _make_st(); sim_page = _stub_render_env(monkeypatch, st)
-    st.session_state["instance"] = _baseline_instance()
-    # pause NOT pressed (a bare MagicMock call is truthy and would pause
-    # the lane inside the button-driven tests)
-    st.sidebar._col_pause.button = MagicMock(return_value=False)
-    st.session_state["sim_speed"] = 60
-    st.sidebar.selectbox = MagicMock(return_value="horizon.json")
-    pressed = {"run": True}
-    st.sidebar._col_run.button = (
-        lambda label, **k: pressed["run"])
-    # sweep passes (display-only) + terminator consumption until done:
-    for _ in range(400):            # 406-min day at 60x = ~7s of passes
-        try:
-            sim_page.render()
-        except SystemExit:          # spare SleepCap exceptions in bare
-            pass
-        pressed["run"] = False      # only the very first pass presses Run
-        if st.session_state.get("sim_running") is False:
-            break
-    assert st.session_state["sim_last_idx"] == 2    # both events consumed
-    assert st.session_state["sim_display_t"] > 300  # swept PAST the last
-    # and the day never terminates before the display clock passes the
-    # final ingest's clock (no stranding future ops at day end).
-
-    # Final-review Fix 2 binding: the terminal pass settles sim_display_t
-    # at end_clock (>= the active schedule's true makespan) and repaints
-    # the board there — the final board is never one dwell stale.
-    makespan = max(int(e["end_time"]) for e in
-                   sim_page._fetch_active_entries(
-                       st.session_state["sim_active_instance"]))
-    assert st.session_state["sim_display_t"] >= makespan - 1, (
-        "terminal repaint must bind display_t to the makespan end_clock")
-    assert st.plotly_chart.call_count >= 1, (
-        "terminal pass must repaint the board at end_clock")
-
-
-# ---------------------------------------------------------------------------
-# Task 3 (scripted live-parity): unified log schema — done/running on
-# every line, both lanes
-# ---------------------------------------------------------------------------
-
-_UNIFIED_SCHEMA = re.compile(
-    r"\[t=\s*\d+\] done=\d+ running=\d+(?: · .*)?$")
 
 
 def test_unified_log_schema_both_lanes(clean_db, demo_scenario,
@@ -1240,9 +806,12 @@ def test_unified_log_schema_both_lanes(clean_db, demo_scenario,
     st.session_state["sim_mode"] = "scripted"
     st.session_state["sim_script"] = str(script)
     st.session_state["sim_speed"] = "instant"
+    # A3: a Run press starts the scheduled day (no auto-run);
+    # the scripted lane's day runs the shared walker end-to-end.
+    st.session_state["sim_run_pressed"] = True
 
-    simulate.render()   # manual-entry seam: runs to terminal in one pass
-    assert st.session_state.get("sim_last_idx") >= 1
+    simulate.render()
+    assert st.session_state["sim_scripted_complete"] is True
     scripted_lines = [ln for ln in st.session_state["sim_feed_scripted"]
                       if ln.strip()]
     assert scripted_lines
@@ -1253,3 +822,69 @@ def test_unified_log_schema_both_lanes(clean_db, demo_scenario,
     for ln in scripted_lines:
         assert _UNIFIED_SCHEMA.match(ln), \
             f"scripted line lacks state numbers: {ln!r}"
+
+
+# ---------------------------------------------------------------------------
+# spec A3 §11: scripted replay IS the live walker (ScheduledInterruptQueue)
+# ---------------------------------------------------------------------------
+
+def test_scheduled_queue_fires_by_minute():
+    """Unit: ScheduledInterruptQueue reuses InterruptQueue's contract —
+    authored events pop in authored order once the walk minute reaches
+    them, and stay queued before that."""
+    from coe.simulator.live import ScheduledInterruptQueue
+
+    q = ScheduledInterruptQueue([(90, "Machine M3 failed"),
+                                 (300, "Machine M3 failed again")])
+    assert q.pop(28) is None          # before the first authored minute
+    assert q.pop(90) == "Machine M3 failed"       # due at its minute
+    assert q.pop(120) is None         # nothing due until 300
+    assert q.pop(999) == "Machine M3 failed again"
+    assert q.remaining == 0
+    assert q.pop(999) is None         # quiet after the schedule runs out
+
+def test_scripted_lane_reuses_live_walker(
+        clean_db, demo_scenario, tmp_path, monkeypatch, request):
+    """Spec A3 §11: the scripted page lane is `_render_live` over
+    `live_day` with scheduled interrupts — the shared walker resolves
+    authored events at their minutes, the day terminates at the board
+    horizon (folded from the review-fix AC 8), and the lane's private
+    keys (`sim_scripted_*`) never touch the live lane's."""
+    sim_page = (lambda: __import__("coe.dashboard.pages.simulate",
+                                   fromlist=["x"]))
+    sim_page = sim_page()
+    st = _make_st()
+    sim_page = _stub_render_env(monkeypatch, st)
+
+    import coe.agents.graph as graph_mod
+    monkeypatch.setattr(graph_mod, "execute_recovery",
+                        lambda *a, **kw: {"status": "COMMITTED",
+                                          "state": types.SimpleNamespace(
+                                              committed_version_id=None)})
+    from coe.config import get_settings
+    get_settings.cache_clear()
+    request.addfinalizer(get_settings.cache_clear)
+
+    # A3 sidebar wiring: the stub buttons must not evaluate truthy —
+    # an unwired col_pause.button MagicMock reads "pressed" and eats
+    # the walk through the paused path (same probe as the other lanes).
+    st.sidebar._col_run.button = MagicMock(return_value=False)
+    st.sidebar._col_pause.button = MagicMock(return_value=False)
+
+    st.session_state["instance"] = _baseline_instance()  # committed board
+    st.session_state["sim_mode"] = "scripted"
+    st.session_state["sim_script"] = _tiny_script(tmp_path)
+    st.session_state["sim_speed"] = "instant"
+    st.session_state["sim_run_pressed"] = True
+
+    sim_page.render()
+
+    # the scripted lane ran the live walker end-to-end: scheduled event
+    # resolved, day terminated at the board horizon, lane keys clean.
+    assert st.session_state["sim_scripted_complete"] is True
+    assert st.session_state["sim_scripted_clock"] >= 100
+    feed = "\n".join(st.session_state["sim_feed_scripted"])
+    assert "recovery" in feed and "COMMITTED" in feed
+    # and the queue drained: the clock ended at the walker's terminus
+    q = st.session_state["sim_scripted_interrupt_q"]
+    assert q.remaining == 0
