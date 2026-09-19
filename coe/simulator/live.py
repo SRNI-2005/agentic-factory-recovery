@@ -31,6 +31,33 @@ class InterruptQueue:
         return None
 
 
+class ScheduledInterruptQueue(InterruptQueue):
+    """Timeline-file events as scheduled interrupts (spec A3 §11).
+
+    Reuses InterruptQueue's contract verbatim: the walker pops at the
+    current tick and never knows the difference between a typed
+    narrative and an authored one. Authored events sit sorted by
+    minute; an event becomes due once the walk minute reaches or
+    passes its authored minute, and the ORDER of resolution stays
+    authored.
+    """
+
+    def __init__(self, scheduled: list[tuple[int, str]] | None = None):
+        super().__init__()
+        self._scheduled: list[tuple[int, str]] = sorted(
+            (int(t), str(msg)) for t, msg in (scheduled or []))
+
+    @property
+    def remaining(self) -> int:
+        return len(self._scheduled)
+
+    def pop(self, t: int) -> str | None:
+        if self._scheduled and t >= self._scheduled[0][0]:
+            minute, msg = self._scheduled.pop(0)
+            return msg
+        return None
+
+
 def _dwell_pause(speed) -> float | None:
     if speed == "instant":
         return None
