@@ -271,3 +271,40 @@ contract, effective on both lanes' REP4302K wiring:
 9. Lanes emit the same log schema; any run's log in scripted lane
    contains the same event/recovery detail as before the amendment
    (unified format) and byte-identical replay remains green.
+
+## 11. Amendment A3 (2026-09-19, user-ruled): TRUE REUSE — the
+## scripted page lane IS the live walker
+
+Supersedes §10's semantic change overruns. Ruling verbatim: "rip out the
+heart of that live replay simulator and place it in the scripted replay;
+the only difference is one has a text box and the other a file import."
+
+1. The scripted replay's PAGE lane stops having its own pacing clock
+   (DisplayClock/sweep sim_display_t removed). The scripted lane driver:
+   `_render_live` (the live lane's controller) driving `live_day` over
+   the scripted fork, with a ScheduledInterruptQueue built from the
+   timeline's authored events.
+2. ScheduledInterruptQueue = thin subclass of InterruptQueue in
+   coe/simulator/live.py: `push_scheduled(t, narrative)` sorted by
+   minute; `pop(t)` yields the earliest event narrated at its minute
+   `t >= scheduled minute`. Authored structured events (MACHINE/
+   WORKER/MATERIAL/NARRATIVE) map 1:1 to deterministic narrative text
+   (`_event_to_narrative` at page) and resolve through the SAME
+   recovery graph the live lane uses — auto-fix (degraded client)
+   default, LLM narration toggle shared. No pacing keys, no pace law —
+   the walker sets the pace.
+3. Interface unification (final): both lanes render
+   [st.metric("Day clock")][gantt][input seam][log]. `_paint_board` no
+   longer owns a clock caption (the metric hero carries the minute).
+   The ONLY element difference between lanes: live = chat input seam;
+   scripted = none on main (timeline import lives in the sidebar).
+   St.info/st.subheader stay off the main page; day-end notices ride in
+   the log stanza caption slot.
+4. Auto-recover toggle is retired (the scripted lane's events now fire
+   exactly like typed narrations: always recover, auto-fix unless the
+   narration toggle is on — same as live). walk_timeline/CLI `simulate
+   timeline` (the deterministic artifact lane) is untouched and remains
+   the reproducible benchmark surface outside the page.
+5. Acceptance: opening the two page lanes yields the same element
+   sequence except the input card; page logs format/flow are the same
+   walker's (one chunk per pass, live dwell); day ends at horizon.
