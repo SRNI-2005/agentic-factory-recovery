@@ -1001,6 +1001,14 @@ def test_day_end_final_board_stays_with_diff_below(
     # terminal refresh from the final active version)
     assert st.plotly_chart.call_count >= 2
 
+    # Task 4: the transition section is a PAIR — initial baseline frame
+    # painted FIRST, final frame SECOND, each with its caption.
+    assert st.plotly_chart.call_count >= 3
+    captions = [str(c.args[0]) for c in st.caption.call_args_list
+                if c.args]
+    assert "Initial (baseline)" in captions
+    assert "Final (after the last recovery)" in captions
+
     # completed-state rerender: the board must STILL be painted above
     # the full log (the early return used to skip the board entirely —
     # on a completed rerender the board vanished)

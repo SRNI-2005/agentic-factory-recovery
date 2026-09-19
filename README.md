@@ -347,6 +347,9 @@ amber border, jobs keep their per-job colours, and after every recovery
 the schedule ahead of the frozen clock re-lays from the new version. At
 day end the final board stays and the schedule-transition diff
 (baseline → final) appears below it.
+Scripted replay carries the same live-day pacing (clock sweeps to the
+board horizon at your speed; events pause and re-lay the board) and the
+same log schema (done/running numbers on every line).
 
 > Live-day runs are demo-grade (typed interruptions drive t — non-
 > deterministic by design); the publication benchmark uses the scripted

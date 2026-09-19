@@ -116,6 +116,9 @@ def _render_diff(instance_name: str, before_entries: list[dict]) -> None:
         st.info("Schedule unchanged by this day.")
         return
     st.subheader("Schedule Transition")
+    st.caption("Initial (baseline)")
+    st.plotly_chart(frames[0], use_container_width=True)
+    st.caption("Final (after the last recovery)")
     st.plotly_chart(frames[-1], use_container_width=True)
 
 
