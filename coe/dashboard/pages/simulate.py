@@ -125,13 +125,13 @@ def _jobs_palette(active: str) -> dict[str, str]:
     return out
 
 
-def _paint_board(active: str, t: int) -> None:
+def _paint_board(active: str, t: int, slot=None) -> None:
     """[gantt] — tree-stable board stanza (spec §3, A3 §11.3).
 
     The clock hero is `_render_day(t)` (shared by both lanes); this
     paints ONE st.plotly_chart per pass at a constant path (unique
-    key — the duplicate-ID crash fix 2026-09-19). The chart repaints
-    per pass at its constant path (spec §4.3 amended); between
+    key — the duplicate-ID crash fix 2026-09-19). Writes go through a
+    stable-path slot when given (all post-walk; staleness fix). Between
     boundaries only the bar colours/state arrays change.
     """
     import streamlit as st
@@ -141,10 +141,10 @@ def _paint_board(active: str, t: int) -> None:
     entries = _fetch_active_entries(active)
     fig = build_board_figure(entries, int(t), _jobs_palette(active))
     if fig is not None:
-        st.plotly_chart(fig, use_container_width=True,
-                        key="sim_gantt")
+        (slot or st).plotly_chart(fig, use_container_width=True,
+                                  key="sim_gantt")
     else:
-        st.empty()          # keep the gantt slot in the tree
+        (slot or st).empty()          # keep the gantt slot in the tree
 
 
 def _board_state_line(instance: str, t: int, detail: str) -> str:
@@ -233,22 +233,25 @@ def _paint_idle_feed(lane: str | None,
     """
     import streamlit as st
 
+    slots = (st.session_state.get("sim_wave_slots_" + lane)
+             if lane else None) or {}
+    hint = slots.get("log_hint") or st.empty()
+    count = slots.get("log_count") or st.empty()
     if lane is not None:
         feed = st.session_state.get("sim_feed_" + lane) or []
     else:
         feed = st.session_state.get("sim_feed") or []
     shown = feed if full else feed[-_LOG_TAIL:]
-    hint = st.empty()
     hint.caption(caption or "")
-    count = st.empty()
     count.caption(
         f"showing last {len(shown)} of {len(feed)} events"
         + (" — full history" if full else ""))
+    slots_box = slots.get("log_box")
+    if slots_box is not None:
+        slots_box.markdown("  \n".join(shown) or "no events yet")
+        return
     with st.container(height=_LOG_VIEWPORT):
         box = st.empty()
-        # two-space line breaks: tight VISUAL rows instead of paragraph
-        # blocks (the "\n\n"-join clipped the viewport to ~4 visible
-        # rows — bug reported 2026-09-16)
         box.markdown("  \n".join(shown) or "no events yet")
 
 
@@ -285,13 +288,29 @@ def _event_schedule(tl) -> list[tuple[int, str]]:
     return [(int(ev.t), _event_narrative(ev)) for ev in tl.events]
 
 
-def _render_day(t: int) -> None:
+def _wave_slots(lane: str) -> dict:
+    """Per-pass stable-path slots, created ONCE at branch top in DOM
+    order [hero][board][log(hint,count,box)] — every pass rebuilds them
+    at the same paths; all WRITES happen post-walk (stale-marker fix),
+    so the freshest state lands in unchanged paths (the double-box and
+    one-pass-lag regressions have the same root: ordering vs writes).
+    """
+    import streamlit as st
+
+    return st.session_state.setdefault(
+        "sim_wave_slots_" + lane,
+        {"hero": st.empty(), "board": st.empty(),
+         "log_hint": st.empty(), "log_count": st.empty(),
+         "log_box": st.empty()})
+
+
+def _render_day(t: int, slot=None) -> None:
     """Clock hero metric — the SAME hero in both lanes (spec A3 §11.3);
     `_paint_board` paints the gantt under it without a clock caption.
     """
     import streamlit as st
 
-    slot = st.empty()
+    slot = slot or st.empty()
     slot.metric("Day clock", f"{int(t)} min")
 
 
@@ -401,7 +420,12 @@ def _render_live(instance_name: str, llm_client_factory, speed,
         while chunk is not None:
             _record(chunk)
             if chunk["event"] == "recovery_start":
-                _paint_idle_feed(lane, None)   # paint BEFORE the solve
+                # pass-blocked solve signal (spec A3 single-paint discipline):
+                # floating toast, NOT a second log container — the log
+                # paints ONCE per pass, post-walk (double-box fix wave).
+                who = ("live LLM" if chunk.get("live")
+                       else "auto-fix (no LLM)")
+                st.toast(f"⏳ recovery starting ({who}) — solving…")
             if chunk["event"] == "day_end":
                 terminal = True
                 break
@@ -423,19 +447,10 @@ def _render_live(instance_name: str, llm_client_factory, speed,
         except Exception:
             pass
 
-    # ONE log surface: always painted, no container chrome around it —
-    # full history at day end, tail while the walk runs.
-    if terminal:
-        # refresh the board ONE more time from the final active version
-        _paint_board(active, st.session_state[f"sim_{lane}_clock"])
-        if st.session_state.get(f"sim_{lane}_before_entries"):
-            _render_diff(active,
-                         st.session_state[
-                             f"sim_{lane}_before_entries"])
-    _paint_idle_feed(
-        lane,
-        "Day complete. Select a new instance to replay."
-        if terminal else None, full=terminal)
+    # A3 single-paint contract: the walker RECORDS; ONE paint wave per
+    # pass — hero + board carry the POST-walk clock (stale-marker fix)
+    # and the LOG paints once (double-box fix). The mid-solve state is
+    # a floating toast, never a second container.
     if terminal:
         st.session_state["sim_running"] = False
         st.session_state["sim_running_lane"] = None
@@ -443,6 +458,11 @@ def _render_live(instance_name: str, llm_client_factory, speed,
     elif rerender:
         _time.sleep(min(60.0 / max(int(speed), 1), 10.0))
         st.rerun()
+    slots = _wave_slots(lane)
+    _render_day(st.session_state[f"sim_{lane}_clock"], slots["hero"])
+    _paint_board(active, st.session_state[f"sim_{lane}_clock"],
+                 slots["board"])
+    return terminal
 
 
 def render() -> None:
@@ -518,6 +538,7 @@ def render() -> None:
 
         llm_client_factory = lambda: DegradedLLMClient()  # noqa: E731
 
+    _ = None  # noqa — keep anchor
     if st.session_state["sim_mode"] == "live":
         # TREE-STABLE live lane: the following element sequence is the
         # SAME in every state — [hero metric][board][chat][log]. No
@@ -538,6 +559,7 @@ def render() -> None:
             return
         active_lane = _ensure_walk_lane(instance_name, lane="live",
                                         label="live")
+        _wave_slots("live")
 
         # Sidebar Run/Pause mirroring the scripted lane (spec §3 step 5).
         # sim_live_paused is live-lane-owned (the scripted sim_paused key
@@ -561,17 +583,12 @@ def render() -> None:
             or live_paused or speed == "instant"
             or st.session_state["sim_live_complete"])
 
-        # §6 chat input — ALWAYS the next element after the sidebar
-        # controls, in EVERY state (fresh/paused/running/complete) so the
-        # log box keeps one stable element path. A typed submission is
-        # queued and the walk reruns; the staged key is the test seam.
-        _render_day(st.session_state["sim_live_clock"])
-        _paint_board(active_lane, st.session_state["sim_live_clock"])
+        # the input card seams NOW (creation-order slot); the queued
+        # narrative pushes pre-walk so this pass's walker resolves it
+        # at its authored minute. staged-first/typed-second — one seam.
         staged = st.session_state.pop("sim_chat_text", None)
         chat = st.chat_input("Describe a disruption to inject mid-flight…",
                              key="sim_live_chat")
-        # Push BOTH (staged first, then typed) — the queue is a deque
-        # with ordered resolution; never drop a typed submission.
         if staged:
             st.session_state["sim_live_interrupt_q"].push(staged)
         if chat:
@@ -579,10 +596,6 @@ def render() -> None:
 
         if pause_pressed:
             st.session_state["sim_live_paused"] = True
-            # a paused lane is no longer walking: clear the flags so a
-            # fresh rerender cannot self-advance while paused (and the
-            # run ends NORMALLY — st.stop() after a paint orphans the
-            # tree: double-log bug 2026-09-16)
             st.session_state["sim_running"] = False
             st.session_state["sim_running_lane"] = None
             _paint_idle_feed("live", "Paused — press Resume.", full=True)
@@ -591,14 +604,26 @@ def render() -> None:
             # Clear the pause BEFORE any early-stop so the walk resumes
             # from sim_live_clock (same ordering as the scripted lane).
             st.session_state["sim_live_paused"] = False
-            _render_live(active_lane, llm_client_factory, speed)
-        elif live_running:
-            # paced self-advancement rerender: no press, keep walking
-            _render_live(active_lane, llm_client_factory, speed)
+        terminal = None
+        if run_pressed or live_running:
+            terminal = _render_live(active_lane, llm_client_factory, speed,
+                                    lane="live")
         elif live_paused:
             _paint_idle_feed("live", "Paused — press Resume.", full=True)
         else:
             _paint_idle_feed("live", "Press Resume to start the live day.")
+        # post-walk wave (the walker already wrote hero/board through the
+        # slots): single log paint per pass at the stable paths.
+        terminal = bool(terminal)
+        _paint_idle_feed(
+            "live",
+            "Day complete. Select a new instance to replay."
+            if terminal else None, full=terminal)
+        if terminal:
+            # day-end diff pair under the log
+            if st.session_state.get("sim_live_before_entries"):
+                _render_diff(active_lane,
+                             st.session_state["sim_live_before_entries"])
         return
 
     # === SCRIPTED REPLAY (spec A3 §11): the live walker, scheduled ===
@@ -643,7 +668,9 @@ def render() -> None:
                                     label=tl.name,
                                     scheduled=_event_schedule(tl))
 
-    # Sidebar Run/Pause — the live branch's same two-column controls.
+    # Sidebar Run/Pause — the live branch's same two-column controls;
+    # wave slots created pre-walk (DOM order [hero][board][log]).
+    _wave_slots("scripted")
     col_run, col_step = st.sidebar.columns(2)
     scripted_paused = st.session_state["sim_scripted_paused"]
     scripted_running = (
@@ -661,11 +688,6 @@ def render() -> None:
         or scripted_paused or speed == "instant"
         or st.session_state["sim_scripted_complete"])
 
-    # tree-stable board paint at the walker's own clock (the hero metric
-    # above comes from the same minute).
-    _render_day(st.session_state["sim_scripted_clock"])
-    _paint_board(active_lane, st.session_state["sim_scripted_clock"])
-
     if pause_pressed:
         st.session_state["sim_scripted_paused"] = True
         st.session_state["sim_running"] = False
@@ -674,14 +696,25 @@ def render() -> None:
         return
     if run_pressed:
         st.session_state["sim_scripted_paused"] = False
-        _render_live(active_lane, llm_client_factory, speed,
-                     lane="scripted")
-    elif scripted_running:
-        _render_live(active_lane, llm_client_factory, speed,
-                     lane="scripted")
+    terminal = None
+    if run_pressed or scripted_running:
+        terminal = _render_live(active_lane, llm_client_factory, speed,
+                                lane="scripted")
     elif scripted_paused:
         _paint_idle_feed("scripted", "Paused — press Resume.", full=True)
     else:
         _paint_idle_feed("scripted",
                          "Press Run to start the scripted day.")
+    # post-walk wave — identical stanza to the live branch (A3):
+    # hero + board come from _render_live (post-walk clock, current
+    # marker); the log paints once; the diff pair sits under it.
+    terminal = bool(terminal)
+    _paint_idle_feed(
+        "scripted",
+        "Day complete. Select a new instance to replay."
+        if terminal else None, full=terminal)
+    if terminal:
+        if st.session_state.get("sim_scripted_before_entries"):
+            _render_diff(active_lane,
+                         st.session_state["sim_scripted_before_entries"])
     return

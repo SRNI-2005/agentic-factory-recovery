@@ -98,7 +98,8 @@ def test_log_paints_capped_tail(monkeypatch, request):
     feed = list(st.session_state["sim_feed_live"])
     assert len(feed) > 10, "baseline day must exceed the cap for the tail"
 
-    simulate._paint_idle_feed("live", None)
+    st.session_state.pop("sim_wave_slots_live", None)  # no wave slots
+    simulate._paint_idle_feed("live", None)             # container path
     md = st.empty.return_value.markdown.call_args_list[-1].args[0]
     # hard line breaks (two-space + newline) = tight 10-row block
     rendered_lines = [ln.rstrip() for ln in md.split("\n")]
@@ -145,6 +146,7 @@ def _make_st():
     # paced auto-advance: real streamlit raises RerunException (the
     # framework rerenders); the stub just records the call.
     st.rerun = MagicMock()
+    st.toast = MagicMock()
     col_run = MagicMock()
     col_pause = MagicMock()
     st.sidebar = types.SimpleNamespace(
@@ -347,10 +349,12 @@ def test_recovery_start_paints_before_inline_solve(
     import coe.agents.graph as graph_mod
 
     def _stub_recovery(*a, **kw):
-        # record what the log surface showed when the solve BEGAN
-        st._md_at_solve = [
-            c.args[0] for c in
-            st.empty.return_value.markdown.call_args_list]
+        # record the mid-solve signal surfaced to the user at solve time
+        # (the floating toast — A3 single-paint contract: the LOG paints
+        # ONCE per pass post-walk; the in-solve visibility is a toast)
+        st._md_at_solve = [c.args[0] for c in st.toast.call_args_list]
+        print("PROBE-RECOVERY narrative:", kw.get("narrative"),
+              "clock:", kw.get("reference_clock"))
         return {"status": "COMMITTED",
                 "state": types.SimpleNamespace(committed_version_id=None)}
 
@@ -377,8 +381,8 @@ def test_recovery_start_paints_before_inline_solve(
     assert "recovery starting" in feed
     assert "recovery NARRATIVE" in feed and "✓" in feed
     assert any("recovery starting" in m for m in st._md_at_solve), (
-        "the ⏳ recovery-starting line must be painted BEFORE the inline "
-        "solve runs (pre-fix the log only painted after the terminator)")
+        "the mid-solve signal must be surfaced (toast) the moment the "
+        "inline solve begins — the log paints once per pass")
 
     # Final-review Fix 2 (AC 8), now via the shared walker: the scripted
     # day ends AT THE BOARD HORIZON — `sim_scripted_clock` carries the
@@ -662,8 +666,9 @@ def test_gantt_slot_tree_stable_live(clean_db, demo_scenario, monkeypatch,
     # clock hero metric painted (same hero both lanes — spec A3 §11.3)
     assert any("Day clock" in str(c.args[0])
                for c in st.empty.return_value.metric.call_args_list)
-    # gantt slot: a plotly chart painted through st.plotly_chart
-    assert st.plotly_chart.called
+    # gantt slot: the board paints through the wave-slot's plotly writer
+    # (stable-path painter — one board element per pass, keyed sim_gantt)
+    assert st.empty.return_value.plotly_chart.called
 
 
 def test_gantt_board_repaints_every_pass(
@@ -679,10 +684,11 @@ def test_gantt_board_repaints_every_pass(
     monkeypatch.setitem(sys.modules, "streamlit", st)
     _seed_live_session(st, _baseline_instance(), press=True)
     simulate.render()
-    assert st.plotly_chart.called
-    first_calls = st.plotly_chart.call_count
+    assert st.empty.return_value.plotly_chart.called
+    first_calls = st.empty.return_value.plotly_chart.call_count
     simulate.render()          # next pass, same state
-    assert st.plotly_chart.call_count > first_calls
+    count = st.empty.return_value.plotly_chart.call_count
+    assert count > first_calls
     # and the fingerprint key must NOT exist (YAGNI guard, spec §4.3)
     assert "sim_gantt_fingerprint" not in st.session_state
 
@@ -716,8 +722,14 @@ def test_day_end_final_board_stays_with_diff_below(
     assert st.plotly_chart.call_count >= 2
 
     # Task 4: the transition section is a PAIR — initial baseline frame
-    # painted FIRST, final frame SECOND, each with its caption.
-    assert st.plotly_chart.call_count >= 3
+    # painted FIRST, final frame SECOND, each with its caption. The
+    # board's keyed chart paints on the wave-slot; the diff pair paints
+    # via the module-level plotly writer (`_render_diff` verbatim).
+    total_charts = (st.empty.return_value.plotly_chart.call_count
+                    + st.plotly_chart.call_count)
+    assert total_charts >= 3, (
+        f"expected board + the two diff frames, got "
+        f"{total_charts}")
     captions = [str(c.args[0]) for c in st.caption.call_args_list
                 if c.args]
     assert "Initial (baseline)" in captions
