@@ -289,19 +289,20 @@ def _event_schedule(tl) -> list[tuple[int, str]]:
 
 
 def _wave_slots(lane: str) -> dict:
-    """Per-pass stable-path slots, created ONCE at branch top in DOM
-    order [hero][board][log(hint,count,box)] — every pass rebuilds them
-    at the same paths; all WRITES happen post-walk (stale-marker fix),
-    so the freshest state lands in unchanged paths (the double-box and
-    one-pass-lag regressions have the same root: ordering vs writes).
+    """Per-pass stable-path slots, created FRESH every render pass in DOM
+    order [hero][board][log(hint,count,box)].
     """
     import streamlit as st
 
-    return st.session_state.setdefault(
-        "sim_wave_slots_" + lane,
-        {"hero": st.empty(), "board": st.empty(),
-         "log_hint": st.empty(), "log_count": st.empty(),
-         "log_box": st.empty()})
+    slots = {
+        "hero": st.empty(),
+        "board": st.empty(),
+        "log_hint": st.empty(),
+        "log_count": st.empty(),
+        "log_box": st.empty()
+    }
+    st.session_state["sim_wave_slots_" + lane] = slots
+    return slots
 
 
 def _render_day(t: int, slot=None) -> None:
@@ -451,17 +452,25 @@ def _render_live(instance_name: str, llm_client_factory, speed,
     # pass — hero + board carry the POST-walk clock (stale-marker fix)
     # and the LOG paints once (double-box fix). The mid-solve state is
     # a floating toast, never a second container.
+    #
+    # Paint BEFORE the potential st.rerun(): rerun raises RerunException
+    # and halts execution — any rendering after it is dead code in paced
+    # mode.  The caller's post-walk _paint_idle_feed also never runs when
+    # rerun fires, so we paint the log here too for the rerender branch.
     if terminal:
         st.session_state["sim_running"] = False
         st.session_state["sim_running_lane"] = None
         st.session_state[f"sim_{lane}_complete"] = True
-    elif rerender:
-        _time.sleep(min(60.0 / max(int(speed), 1), 10.0))
-        st.rerun()
-    slots = _wave_slots(lane)
+
+    slots = st.session_state["sim_wave_slots_" + lane]
     _render_day(st.session_state[f"sim_{lane}_clock"], slots["hero"])
     _paint_board(active, st.session_state[f"sim_{lane}_clock"],
                  slots["board"])
+
+    if rerender and not terminal:
+        _paint_idle_feed(lane, None)
+        _time.sleep(min(60.0 / max(int(speed), 1), 10.0))
+        st.rerun()
     return terminal
 
 
