@@ -1,6 +1,9 @@
 from functools import lru_cache
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -8,8 +11,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "postgresql+psycopg://coe:coe@localhost:5432/coe"
-    mqtt_host: str = "localhost"
+    database_url: str = "postgresql+psycopg://coe:coe@127.0.0.1:5432/coe"
+    mqtt_host: str = "127.0.0.1"
     mqtt_port: int = 1883
     default_seed: int = 42
     telemetry_chunk_interval_minutes: int = 10080

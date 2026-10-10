@@ -7,7 +7,7 @@ import pytest
 
 APP_PY = Path(__file__).resolve().parents[2] / "coe" / "dashboard" / "app.py"
 
-_source = APP_PY.read_text()
+_source = APP_PY.read_text(encoding="utf-8")
 _tree = ast.parse(_source)
 
 
