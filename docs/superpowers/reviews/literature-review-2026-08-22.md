@@ -1,5 +1,7 @@
 # Literature Review & Research-Gap Analysis
 
+> **SUPERSEDED 2026-09-11** by `literature-review-2026-09-11.md` (citation-verified, publication-grade rewrite). Corrections that supersede claims below: row 6 authors are Li & Gao (not "Gao, L. et al."); row 16 → Blekos et al., Physics Reports (not the CERN/Indico talk); row 30's difference-rewards claim removed as unverified; row 37b authorship corrected (Amiri et al. IECON 2024 — not Zdun); Cabane & Farias cited in its anti-EDA direction; Schworm 2024 Manuf. Lett. / Procedia CIRP 2026 / QST Schmid et al. completed with DOIs. See the 2026-09-11 file for the full novelty assessment.
+
 **Project:** Agentic Autonomous Factory Recovery System (Middleware Integration for Event-Driven FJSP Optimization)
 **Date:** 2026-08-22
 **Scope:** Review of all five approved specs against 41 papers. Recency: **31/41 papers from 2024–2026 (76%)**; the remaining 10 older works are load-bearing foundations (benchmark definitions, canonical encodings, constrained-generation precedents) without which the project's methods would be ungrounded.
@@ -13,8 +15,8 @@
 | # | Reference | Role for this project |
 | --- | --- | --- |
 | 1 | Brandimarte, P. (1993). *Routing and scheduling in a flexible job shop by tabu search.* Ann. Oper. Res. 41, 157–183 | Source of the MK01 benchmark; defines the FJSP structure our schema encodes |
-| 2 | Venturelli, D., Marchand, D.J.J., Rojo, G. (2015). *Quantum annealing implementation of job-shop scheduling.* arXiv:1506.08479 | Canonical time-indexed QUBO encoding with one-hot, precedence, and no-overlap penalties — Phase 4 §5 follows it directly |
-| 3 | Carugno, C., Ferrari Dacrema, M., Cremonesi, P. (2022). *Evaluating the job shop scheduling problem on a D-Wave quantum annealer.* Sci. Reports 12:6539 | Demonstrates horizon-selection trap; validates seeding T from OR-Tools — adopted as CP-SAT-seeded horizon (Phase 4 §5.1) |
+| 2 | Venturelli, D., Marchand, D.J.J., Rojo, G. (2015). *Quantum annealing implementation of job-shop scheduling.* arXiv:1506.08479 | Canonical time-indexed QUBO encoding with one-hot, precedence, and no-overlap penalties — Phase 4 §5 follows it directly *(2026-09-11 double-check: verified, arXiv:1506.08479, time-indexed one-hot + "window shaving" pruning confirmed)* |
+| 3 | Carugno, C., Ferrari Dacrema, M., Cremonesi, P. (2022). *Evaluating the job shop scheduling problem on a D-Wave quantum annealer.* Sci. Reports 12:6539 | Demonstrates horizon-selection trap; validates seeding T from OR-Tools — adopted as CP-SAT-seeded horizon (Phase 4 §5.1). *(2026-09-11 double-check: verified with title and DOI 10.1038/s41598-022-10169-0; it is a makespan study — the Phase 5.3 tardiness surrogate is NOT from this paper, it was re-attributed to Lopez-Ruiz 2025, #11)* |
 | 4 | Kurowski, K. et al. (2023). *Application of QAOA to JSSP.* EJOR S0377221723002072 (+ Kurowski et al. 2020 ICCS hybrid QA heuristic) | QAOA makespan surrogate on toy instances at simulator scale — precedent for our micro-instance simulation studies |
 | 5 | Preskill, J. (2018). NISQ framing, Quantum 2:79 | Justifies quantum-as-research-layer positioning (Phases 4–5) |
 | 6 | Gao, L. et al. (2016). *An effective hybrid GA and TS for FJSP.* Int. J. Prod. Econ. 174, 93–110 | MK01 = 40 reference table (~20 metaheuristics converge) grounding Phase 2 Tier-1 assertion |
@@ -24,11 +26,11 @@
 
 | # | Reference | Key finding used |
 | --- | --- | --- |
-| 8 | Efficient encoding for JSP. (2024). Quantum Sci. Technol. 10.1088/2058-9565/ad9cba | Time-indexed variable explosion quantified (N/log₂N factor); justifies ≤32-binary ceiling + head/tail pruning |
+| 8 | Efficient encoding for JSP. (2024). Quantum Sci. Technol. 10.1088/2058-9565/ad9cba | Time-indexed variable explosion quantified (N/log₂N factor); justifies `QUANTUM_VAR_CEILING` (24 after the 2026-09-11 Phase 4 amendment, lowered from 32 for statevector-RAM practicality) + head/tail pruning |
 | 9 | Fu, K. et al. (2025). *Solving FJSP based on quantum computing.* Entropy 27(2):189 | Recent FJSP-specific quantum formulation landscape |
 | 10 | Schworm, P. et al. (2026). *Evaluation of QA-based algorithms for FJSP.* Procedia CIRP | Threshold problem sizes where annealers suffice vs hybrids required — Phase 5 shadow-node measurement operationalizes exactly this question |
-| 11 | Lopez-Ruiz, M.A. et al. (2025). *A non-variational quantum approach to the JSSP.* arXiv:2510.26859 (IonQ Forte) | JIT-JSSP tardiness objective; variable-freezing to build 24–36 qubit sub-instances — direct methodological precedent for our micro-slice extraction; classical exponential scaling evidence |
-| 12 | Thermodynamic significance of QUBO encoding. (2026). arXiv:2601.04402 | `(p_sum, p_pair)` penalty families with sharp feasibility transitions — basis of Phase 4 calibration sweep + separation criterion |
+| 11 | Lopez-Ruiz, M.A. et al. (2025). *A non-variational quantum approach to the JSSP.* arXiv:2510.26859 (IonQ Forte) | JIT-JSSP tardiness objective; variable-freezing to build 24–36 qubit sub-instances — direct methodological precedent for our micro-slice extraction; classical exponential scaling evidence *(2026-09-11 double-check: verified, title/authors/JIT-JSSP on IonQ Forte confirmed; per §5.3 it now carries the tardiness-surrogate attribution, including the per-job window normalization family)* |
+| 12 | Thermodynamic significance of QUBO encoding. (2026). arXiv:2601.04402 | `(p_sum, p_pair)` penalty families with sharp feasibility transitions — basis of Phase 4 calibration sweep + separation criterion *(2026-09-11 double-check: verified — Doucet et al., New J. Phys. 28 054512, Jan 2026; abstract confirms the p_sum/p_pair encoding family and the low-energy-infeasible-manifold separation finding)* |
 | 13 | Hybrid quantum-classical scheduling, AIS room scheduling. (2025). arXiv:2509.04808 | Real-world scheduling evaluated on annealer as a study, not production authority |
 | 14 | Hybrid classical–quantum optimization of routing. (2026). arXiv:2604.01250 | "Quantum value lies in difficult subproblems rather than end-to-end replacement"; overhead/noise warnings — foundation of the shadow-branch architecture |
 | 15 | Multi-objective rescheduling of JSSP using QA. (2024). ScienceDirect S2213846324001287 | Quantum rescheduling under machine failures exists only as offline study — gap confirmed |
@@ -97,7 +99,7 @@
 
 ## 3. Research Gaps This Project Solves
 
-**G1 — Verified agentic recovery (Phases 2–3).** No published system combines an LLM semantic layer with a closed strategy catalog, deterministic applier, pre-commit invariant gates, post-commit verifier, and append-only rollback for FJSP recovery. MASC lacks formal verification; ALAS/SagaLLM provide the guarantees but not for committed manufacturing schedules. This project operationalizes SagaLLM-style transaction semantics on top of a certifying CP-SAT engine. The bounded-catalog pattern draws on the broader constrained-generation literature — Guidance (Microsoft, 2023), Outlines (Willard & Louf, 2023), and LMQL (Beurer-Kellner et al., 2023) demonstrate that restricting LLM output to validated schemas dramatically improves reliability in tool-use settings; this project applies the same principle to manufacturing recovery, where the "schema" is a pydantic discriminated union over four strategy types.
+**G1 — Verified agentic recovery (Phases 2–3).** No published system combines an LLM semantic layer with a closed strategy catalog, deterministic applier, pre-commit invariant gates, post-commit verifier, and append-only rollback for FJSP recovery. MASC lacks formal verification; ALAS/SagaLLM provide the guarantees but not for committed manufacturing schedules. This project operationalizes SagaLLM-style transaction semantics on top of a certifying CP-SAT engine. The bounded-catalog pattern draws on the broader constrained-generation literature — Guidance (Microsoft, 2023), Outlines (Willard & Louf, 2023), and LMQL (Beurer-Kellner et al., 2023) demonstrate that restricting LLM output to validated schemas dramatically improves reliability in tool-use settings; this project applies the same principle to manufacturing recovery, where the "schema" is a pydantic discriminated union over the five closed-catalog strategy types (`TARDINESS_WEIGHT`, `DEFER_JOB`, `SUSPEND_JOB`, `EXPEDITE_MATERIAL`, `WEIGHT_PRESET` — five since the 2026-08-24 Phase 3 amendment).
 
 **G2 — Narrative-to-structured disruption ingestion with fidelity measurement (Phase 3).** Every DRL/MAS/quantum rescheduling work assumes disruptions arrive structured. The Translation Agent + seeded ground-truth corpus + exact-match/non-degradation benchmarks fill an ingestion gap the field does not address.
 
@@ -117,8 +119,8 @@
 | --- | --- |
 | Phase 1 | MK01 parser expectations verified against independent artifact (SchedulingLab repo); MQTT/EDA design matches 2024–2025 IIoT empirical literature |
 | Phase 2 | AddCircuit/explicit-interval setups match OR-Tools' own documented patterns; MK01=40 target grounded in ~20-algorithm convergence tables (Gao 2016) |
-| Phase 3 | Architecture sits precisely at the intersection MASC (agents for FJSP) and SagaLLM (transactional validation) occupy separately; fidelity metrics align with DyneSchedBench-era evaluation practice |
-| Phase 4 | Encoding/objective/calibration choices each traceable to ≥2 primary sources (Venturelli 15; QST 24; 2601.04402; Carugno 22; Lopez-Ruiz 25); scale honesty consistent with all five |
+| Phase 3 | Architecture sits precisely at the intersection MASC (agents for FJSP) and SagaLLM (transactional validation) occupy separately; fidelity metrics align with DynaSchedBench-era evaluation practice |
+| Phase 4 | Encoding/objective/calibration choices each traceable to primary sources (Venturelli 15; QST 24; 2601.04402; Carugno 22 for horizon; Lopez-Ruiz 25 for the JIT tardiness objective); scale honesty consistent with all five |
 | Phase 5 | Shadow-integration + honest-latency comparison directly implements the hybrid-evaluation program called for by arXiv 2604.01250 and Schworm 2026 |
 
 ## 5. Honest Limitations

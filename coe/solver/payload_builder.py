@@ -492,19 +492,49 @@ def build_payload(
     blocked_operations = suspended_entries + blocked_operations
 
     # ---- material physics inputs for the engine reservoir (§6.11,
-    # amendment 2026-08-24 third) ----
-    # ALL receipts are emitted regardless of horizon: post-horizon refills are
-    # inert to the solver but audit-relevant, and a deferred operation must see
-    # its delivery. Capacity is restated as initial stock at t = 0; arrivals
-    # enter exclusively as refill events (no double-counting).
-    all_receipts = [
-        {"sku": sku, "quantity": r.quantity, "available_at": r.available_at}
-        for r, sku in receipt_rows
-    ]
+    # amendment 2026-08-24 third; day-simulator amendment 2026-09-12) ----
+    # ALL receipts ARE emitted at baseline (post-horizon refills inert but
+    # audit-relevant). For RECOVERY with a reference clock `now`, consumed
+    # history leaves the picture: capacity = initial stock MINUS bars
+    # consumed before `now` (frozen plays: completions + in-progress starts),
+    # and pre-clock receipts (available_at <= now) are FOLDED INTO that
+    # effective stock instead of staying refill rows (they refill no future
+    # consumption). Consumption is gated on payload status (COMPLETED /
+    # IN_PROGRESS after the freeze), mirroring P2 §3.1 boundary semantics.
+    now_ = now if recovering else None
+    consumed_by_sku: dict[str, int] = {}
+    if recovering and now_ is not None:
+        for entries in ops_by_job.values():
+            for e in entries:
+                if e["status"] in ("COMPLETED", "IN_PROGRESS"):
+                    for d in bom_by_op.get(e["operation_id"], []):
+                        consumed_by_sku[d["sku"]] = (
+                            consumed_by_sku.get(d["sku"], 0) + d["quantity"])
+    folded_by_sku: dict[str, int] = {}
+    if recovering and now_ is not None:
+        for r, sku in receipt_rows:
+            if r.available_at <= now_:
+                folded_by_sku[sku] = folded_by_sku.get(sku, 0) + r.quantity
+        all_receipts = [
+            {"sku": sku, "quantity": r.quantity, "available_at": r.available_at}
+            for r, sku in receipt_rows if r.available_at > now_
+        ]
+    else:
+        all_receipts = [
+            {"sku": sku, "quantity": r.quantity, "available_at": r.available_at}
+            for r, sku in receipt_rows
+        ]
     all_receipts.sort(
         key=lambda d: (d["sku"], d["available_at"], d["quantity"]))
-    materials_out = [{"sku": s, "capacity": stock_by_sku.get(s, 0)}
-                     for s in sorted(stock_by_sku)]
+    materials_out = [
+        {"sku": s,
+         "capacity": stock_by_sku.get(s, 0)
+                     - (consumed_by_sku.get(s, 0)
+                        if recovering and now_ is not None else 0)
+                     + (folded_by_sku.get(s, 0)
+                        if recovering and now_ is not None else 0)}
+        for s in sorted(set(stock_by_sku) | set(folded_by_sku))
+    ]
 
     # ---- initial family seeding from the active snapshot ----
     machine_initial_families: dict[str, str] = {}

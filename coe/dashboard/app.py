@@ -14,6 +14,10 @@ def main() -> None:
     from coe.dashboard.pages.analytics import render as render_analytics
     from coe.dashboard.pages.history import render as render_runs
     from coe.dashboard.pages.benchmarks import render as render_benchmarks
+    from coe.dashboard.pages.cockpit import render as render_cockpit
+    from coe.dashboard.pages.configure import render as render_configure
+    from coe.dashboard.pages.runs import render as render_runs
+    from coe.dashboard.pages.simulate import render as render_simulate
     from coe.db.session import session_scope
 
     st.set_page_config(
@@ -90,6 +94,11 @@ def main() -> None:
 
     # ---- page navigation ----
     pages = [
+        st.Page(render_cockpit, title="Cockpit", icon="⚙️", url_path="cockpit", default=True),
+        st.Page(render_configure, title="Configure", icon="🔧", url_path="configure"),
+        st.Page(render_runs, title="Runs", icon="📊", url_path="runs"),
+        st.Page(render_benchmarks, title="Benchmarks", icon="📈", url_path="benchmarks"),
+        st.Page(render_simulate, title="Simulate", icon="🎬", url_path="simulate"),
         st.Page(render_overview, title="Overview", icon="🏠", url_path="overview", default=True),
         st.Page(render_configure, title="Configure — Dataset", icon="📊", url_path="dataset"),
         st.Page(render_baseline, title="Baseline Schedule", icon="⚙️", url_path="baseline"),

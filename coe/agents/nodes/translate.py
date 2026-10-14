@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from coe.agents.records import (
     RecordValidationError,
+    check_narrative_ids,
     parse_disruption_record,
     validate_record_fields,
 )
@@ -43,7 +44,14 @@ Rules: exactly ONE disruption per record — if the report describes \
 several simultaneous disruptions, output {"error":"multiple disruptions"} \
 and nothing else. Resolve relative times ("two hours ago") against the \
 reference clock given in the prompt; occurred_at is an absolute minute. \
-Use the exact machine/worker/SKU identifiers as they appear in the report."""
+The report may use natural language names (e.g. "machine one", "press 01") \
+only when no explicit identifier token appears: map those loosely to the \
+matching valid identifier. If the report names an explicit identifier \
+(e.g. "MC-04", "M3", "W10", "MAT-001"): first find the valid identifier \
+with the SAME trailing digits ("MC-04" matches machine M4; "MAT-1" \
+matches MAT-001). Bind to that one and output it. If NO valid identifier \
+shares those digits, reject — output {"error":"unknown resource <id>"} \
+— and NEVER substitute a different identifier for it (§4.1 layer 3)."""
 
 
 class TranslationFailed(RuntimeError):
@@ -54,11 +62,20 @@ class TranslationFailed(RuntimeError):
 
 
 def build_translate_messages(narrative: str, instance_name: str,
-                             clock: int) -> tuple[str, str]:
+                             clock: int,
+                             valid_ids: dict[str, list[str]] | None = None,
+                             ) -> tuple[str, str]:
     user = (
         f"Target instance: {instance_name}\n"
-        f"Reference clock: minute {clock}\n"
-        f"Report:\n{narrative}")
+        f"Reference clock: minute {clock}\n")
+    if valid_ids:
+        if valid_ids.get("machines"):
+            user += f"Valid machine IDs: {', '.join(valid_ids['machines'])}\n"
+        if valid_ids.get("workers"):
+            user += f"Valid worker IDs: {', '.join(valid_ids['workers'])}\n"
+        if valid_ids.get("materials"):
+            user += f"Valid material SKUs: {', '.join(valid_ids['materials'])}\n"
+    user += f"Report:\n{narrative}"
     return _SYSTEM_PROMPT, user
 
 
@@ -103,6 +120,23 @@ def record_to_wire_payload(record: dict, *, message_id: str) -> dict:
     return payload
 
 
+def _fetch_valid_ids(session, instance_id: int) -> dict[str, list[str]]:
+    from sqlalchemy import text
+    rows = session.execute(text(
+        "SELECT name FROM machines WHERE instance_id = :iid ORDER BY name"
+    ), {"iid": instance_id}).mappings().all()
+    ids: dict[str, list[str]] = {"machines": [r["name"] for r in rows]}
+    rows = session.execute(text(
+        "SELECT name FROM workers WHERE instance_id = :iid ORDER BY name"
+    ), {"iid": instance_id}).mappings().all()
+    ids["workers"] = [r["name"] for r in rows]
+    rows = session.execute(text(
+        "SELECT sku FROM materials WHERE instance_id = :iid ORDER BY sku"
+    ), {"iid": instance_id}).mappings().all()
+    ids["materials"] = [r["sku"] for r in rows]
+    return ids
+
+
 def _instance_row(session, name):
     from coe.db.models.provenance import Instance
 
@@ -122,10 +156,12 @@ def run_translate(state: RecoveryState, *, client,
         inst_row = _instance_row(session, state.instance_name)
         clock = resolve_reference_clock(session, inst_row.id,
                                         state.reference_clock)
+        valid_ids = _fetch_valid_ids(session, inst_row.id)
         feedback = ""
         for attempt in range(1 + retries):
             system, user = build_translate_messages(
-                state.narrative, state.instance_name, clock)
+                state.narrative, state.instance_name, clock,
+                valid_ids=valid_ids)
             try:
                 raw = client.complete(system=system, user=user + feedback)
             except Exception as exc:      # client transport failure
@@ -141,6 +177,8 @@ def run_translate(state: RecoveryState, *, client,
                 record = validate_record_fields(
                     record, session=session,
                     instance_name=state.instance_name)
+                check_narrative_ids(
+                    record, narrative=state.narrative, valid_ids=valid_ids)
             except (ValueError, ValidationError, RecordValidationError) \
                     as exc:
                 feedback = (f"\n\nYour previous output was rejected: "

@@ -356,7 +356,7 @@ def execute_recovery_streaming(instance_name: str, *, trigger: str,
             disruption_record_json=record_json, started_at=started,
             finished_at=_time.time(),
             final_status_version_id=None)
-        yield {"status": status, "state": str(exc), "run_id": run_id}
+        yield {"status": status, "state": final_state, "run_id": run_id}
         return
     else:
         status = _terminal_status(final_state)

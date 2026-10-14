@@ -3,11 +3,11 @@
   "agent": {
     "implementer": {
       "mode": "subagent",
-      "model": "opencode-go/mimo-v2.5"
+      "model": "opencode-go/glm-5.3-flash"
     },
     "reviewer": {
       "mode": "subagent",
-      "model": "opencode-go/longcat-2.0",
+      "model": "opencode-go/glm-5.3-flash",
       "permission": {
         "edit": "deny"
       }

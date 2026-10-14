@@ -15,3 +15,4 @@ frontend/dist/
 frontend/dev-dist/
 .screenshots/
 benchmark_report.json
+.streamlit/

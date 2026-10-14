@@ -50,7 +50,7 @@ One-way dependencies only. The shadow node consumes Phase 4 modules verbatim and
 ## 4. Shadow Quantum Node
 
 - Appended after `explain`; executes only when `QUANTUM_SHADOW_ENABLED=true` (default false).
-- Input: the same deterministic 3-job/2-machine micro-instance produced by Phase 4's fixed extractor (first 3 jobs by name-sort fitting 2 machines). The shadow measures quantum feasibility on a canonical micro-slice of `factory_demo_01`, not on the specific disruption's affected jobs — neighborhood-aware extraction is a documented future extension.
+- Input: the same deterministic 3-job/2-machine micro-instance produced by Phase 4's fixed extractor — selection follows the normative extractor rule of Phase 4 §4 (as amended 2026-09-11: job-name sort, single common 2-machine set, ≤ 3-minute minimum durations). The shadow measures quantum feasibility on a canonical micro-slice of `factory_demo_01`, not on the specific disruption's affected jobs — neighborhood-aware extraction is a documented future extension.
 - Execution: Phase 4's extractor/QUBO/QAOA/decode chain invoked as pure functions with the fixture seed; results (feasible rate, gap, timings) serialized into `recovery_runs.quantum_shadow_json`.
 - Failure isolation: any exception inside the node is caught and recorded as `{status: SHADOW_FAILED, error}`; the run itself remains `COMMITTED` and fully successful.
 - Determinism: identical run state plus seed produce byte-identical shadow JSON.

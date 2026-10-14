@@ -1,9 +1,39 @@
+import os
 from pathlib import Path
 
-import pytest
+# MUST run before any coe import: pytest targets the DEDICATED TEST
+# database (:5433, container `timescaledb-test`), never the interactive
+# demo DB (:5432). An explicit user override wins only in CI-like
+# scenarios where someone wires a different test DB.
+os.environ["DATABASE_URL"] = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://coe:coe@localhost:5433/coe",
+)
+
+import pytest  # noqa: E402
 
 from coe.db.admin import reset_database  # noqa: F401  (re-exported for fixtures)
 from coe.config import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_bindings():
+    """Prevent cross-test pollution of the settings caching layer.
+
+    Tests that monkeypatch/patch ``coe.config.get_settings`` can leave a
+    stale binding behind if another module lazily does ``from coe.config
+    import get_settings`` while the patch is active (e.g. ``make_engine``
+    imports lazily inside ``coe.db.session``). Snapshot the pristine
+    bindings before each test and restore them after; also clear the
+    ``get_settings`` lru_cache so env/tests that prime it never leak
+    cached values across tests.
+    """
+    import coe.db.session as db_session
+
+    pristine_db_session_get_settings = db_session.get_settings
+    yield
+    db_session.get_settings = pristine_db_session_get_settings
+    get_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")

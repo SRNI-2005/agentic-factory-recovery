@@ -190,17 +190,60 @@ def _render_gantt(entries):
                 Machine=machine,
                 Task=label,
                 Worker=worker,
-                Start=pd.Timestamp("2024-01-01") + pd.Timedelta(minutes=start),
-                Finish=pd.Timestamp("2024-01-01") + pd.Timedelta(minutes=end),
+                start=start,
+                dur=max(1, end - start),
             )
         )
     df = pd.DataFrame(rows)
-    fig = px.timeline(
-        df, x_start="Start", x_end="Finish", y="Machine",
-        color="Task", hover_data=["Worker"],
-    )
-    fig.update_yaxes(autorange="reversed")
-    fig.update_layout(height=max(300, len(set(r["Machine"] for r in rows)) * 50 + 100))
+
+    # Explicit numeric-minute Gantt (NO px.timeline — its datetime axis
+    # renders integer minutes as epoch dates, which erased the bars).
+    import plotly.graph_objects as go
+
+    machines = list(dict.fromkeys(r["Machine"] for r in rows))
+    color_pool = px.colors.qualitative.Light24
+    color_by_job = {t: color_pool[i % len(color_pool)]
+                    for i, t in enumerate(sorted(df["Task"].str.split("/op").str[0]
+                                                  .unique()))}
+    fig = go.Figure()
+    def _skus_for(job_name: str, sequence: int) -> str:
+        for r in entries:
+            if (r.get("job_name") == job_name
+                    and int(r.get("sequence_number", -1)) == sequence):
+                return r.get("material_skus") or "none demanded"
+        return "—"
+    for task, grp in df.groupby("Task", sort=False):
+        job_name, seq_s = task.rsplit("/op", 1)
+        seq = int(seq_s)
+        customdata = [
+            (int(r["start"]) + int(r["dur"]),
+             r["Worker"],
+             task,
+             _skus_for(job_name, seq))
+            for r in grp.to_dict("records")
+        ]
+        fig.add_trace(go.Bar(
+            x=list(grp["dur"]),
+            base=list(grp["start"]),
+            y=list(grp["Machine"]),
+            name=task,
+            orientation="h",
+            marker_color=color_by_job[job_name],
+            text=task,
+            textposition="none",
+            customdata=customdata,
+            hovertemplate=(
+                "%{y}<br>Operation: %{customdata[2]}<br>"
+                "Start: %{base} min · End: %{customdata[0]} min · "
+                "Worker: %{customdata[1]}<br>"
+                "Materials: %{customdata[3]}<extra></extra>"
+            ),
+        ))
+    fig.update_xaxes(title_text="Time (minutes)", tick0=0, dtick=60)
+    fig.update_yaxes(autorange="reversed", categoryorder="array",
+                     categoryarray=machines)
+    fig.update_layout(barmode="overlay", showlegend=True,
+                      height=max(300, len(machines) * 50 + 100))
     import streamlit as st
     st.plotly_chart(fig, use_container_width=True)
 

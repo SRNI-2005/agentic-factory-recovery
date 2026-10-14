@@ -1,0 +1,310 @@
+# Live-Day Gantt Preview — Design
+
+**Status:** Approved in conversation (2026-09-18)
+**Date:** 2026-09-18
+**Phase:** Post-live-day capability; extends the Simulate page
+**Sibling spec:** `2026-09-13-live-day-simulator-design.md` (walk engine —
+unchanged); this spec adds the *board* that page currently lacks
+(the "mini-Gantt evolution" intent of `2026-09-12`, now realized).
+
+## 1. Purpose
+
+The live day is currently playable but invisible: the Simulate page shows a
+big clock, a 10-line log tail, and a completion-time diff chart. This spec
+adds the board itself — a machines × time Gantt of the *active* schedule
+The live day is currently playable but invisible: the Simulate page shows a
+big clock, a 10-line log tail, and a completion-time diff chart. This spec
+adds the board itself — a machines × time Gantt of the *active* schedule
+that advances with the clock, highlights completed / in-progress /
+future operations by the now-marker, re-lays out after every committed
+recovery, and completes the day with a before→final diff.
+
+## 2. Scope
+
+### Included
+
+- **Live board** on the Simulate page for BOTH lanes (Live day + Scripted
+  replay). It renders the same commit chain both modes drive; the scripted
+  lane is unchanged behaviorally (reproducible) and gets the board for
+  free.
+- **Clock hero** above the board: the current simulation minute t
+  (self-updating with the pace in paced mode; static at instant).
+- **State encoding on bars** (per-bar arrays on the existing numeric
+  `go.Bar` figure; no new palette, no per-trace splitting):
+  - bar **colour = job colour** (one colour per JOB across all its
+    operations — as built by the Configure page, commit 889444c);
+  - **completed** (`end_time <= t`) → same colour at **opacity 0.35**
+    (dimmed: time passed);
+  - **in-progress** (`start_time <= t < end_time`) → same colour at full
+    opacity + **amber border** (`marker.line.color = amber, width 3`);
+  - **future** (`start_time > t`) → full opacity, no border.
+- **Now-marker**: one thin vertical line at the current minute
+  (CSS `vline` shape annotation on the figure — no HTML overlay needed;
+  Streamlit repaints the figure in-place at the stable path).
+- **Rebuild discipline** (render cost, spec §4.3): the figure is
+  re-serialized on EVERY pass at a CONSTANT element path — under
+  Streamlit's whole-page-rerun model an unpainted slot vanishes, so
+  repaint-per-pass is the only streamlit-native mechanism compatible
+  with the "no fragments / no autorefresh / don't overcomplicate"
+  constraints. Python-side build cost (≈168 bars of data prep) is
+  10–30ms against a paced dwell of ≥2s; the heavy page cost stays
+  capped by the already-shipped 10-line log tail. A future
+  isolated-subtree design could add between-boundary skipping —
+  explicitly out of scope.
+- **Option A at day end**: the final board stays on screen; the existing
+  `_render_diff` (before-baseline vs after-final frames, `_render_diff`
+  reused verbatim) renders BELOW it.
+
+### Excluded
+
+- Bar splitting (proportional fill of in-progress bars) — user ruling
+  2026-09-18: "keep it simple"; the marker line carries the progress
+  sense.
+- Structured-event injection into live mode (spec 2026-09-13 §2 exclusion,
+  unchanged).
+- Any change to `live_day`, `walk_timeline`, the recovery graph, or the
+  scripted lane's timeline semantics — display-only work over data that
+  already exists.
+
+## 3. Page layout (tree-stable contract)
+
+The Simulate page now renders, in BOTH live and scripted modes, this
+element sequence — constant in every state:
+
+```
+[clock slot]      st.empty()  — "t = 123 min (30×)" text, always present
+[gantt slot]      plotly chart at a FIXED element path
+[log box]         existing 4-element painter stanza (unchanged)
+```
+
+- Idle pre-run: clock slot shows "t = 0"; the gantt slot shows the
+  static board preview of the committed active version (same figure,
+  state classes all "future").
+- Pacing text, paused, day-complete notes ride in the log painter's
+  caption slot or the clock slot — never as free-standing conditional
+  elements (S lesson from the double-box bug: tree shape must not vary).
+- Any conditional above/between these slots is FORBIDDEN (fails a new
+  page-invariant test).
+
+## 4. Data flow
+
+1. The board's source is the **active schedule** of the played instance
+   (`active_schedule` view → `_fetch_active_entries` — unchanged query).
+   The projector is *not* involved; the board is a read-only projection
+   of the committed schedule at minute t. Phase 2 stays the sole
+   scheduling authority (§1 rule, all specs).
+2. Classification per entry: `end <= t` completed; `start <= t < end`
+   in-progress; `start > t` future. At a recovery commit the new active
+   version's entries re-derive entirely; `t` does not rewind (same rule
+   as the walk, spec 2026-09-13 §3.4).
+ 3. Rebuild rule: NO fingerprint gate (it contradicts full-page rebuild
+    semantics — an unpainted slot disappears). The figure repaints every
+    pass at the SAME slot; the builder is a pure (entries, t) function so
+    intermediate frames can never be wrong; `sim_gantt_fingerprint` does
+    NOT exist as a session key.
+4. The diff figure at day end uses the SAME session capture
+   (`sim_before_entries`) as today, so commit-at-end produces the
+   before→final comparison without new plumbing.
+
+## 5. Architecture
+
+```text
+coe/dashboard/pages/simulate.py (modified)
+    coe/dashboard/gantt.py (new, pure)
+        classify(entries, t) -> {completed|in_progress|future: ids}
+        build_board_figure(entries, t, jobs_palette) -> go.Figure
+            (go.Bar, numeric minute axis, per-job colors,
+             per-bar dim/border state arrays, vline marker)
+            — pure: no DB, no solver, no session access
+    render():
+        tree-stable slots: [clock][gantt][log]
+        clock: st.empty() slot, text = f"t = {t} min · {speed}×"
+        gantt: st.plotly_chart(...) repainted EVERY pass (same path)
+    (log painter unchanged)
+```
+
+Everything lives in the page module; no new files except tests. Build
+helpers re-used as-is: `_fetch_active_entries`, the Configure page's
+figure vocabulary (numeric bars, hh:mm axis labels, hover = J9/opN
+Start/End/Worker/Durations — same builder functions where importable;
+otherwise duplicated glue kept minimal and pointed at the Configure
+module).
+
+## 6. UX
+
+- Clock line updates in place (`st.empty()`), so no dead repaint between
+  boundaries.
+- While paced: board visual changes only at boundaries (bar crossing
+  marker), and after commits. The rest is clock movement + marker.
+- Pause freezes everything; the last board remains; Resume continues.
+- A new instance selection re-forks the lane and resets the board
+  (existing `_ensure_live_lane` reset — extend to clear
+  (No fingerprint reset needed in `_ensure_live_lane` — no such key
+  exists.)
+- Speed changes take effect on the next dwell (no re-decoration).
+
+## 7. Testing strategy
+
+- **Unit (engine-side, no UI)**: `_render_board` classification — feed
+  fixture entries + t, assert (a) state class of each op, (b) opacity /
+  border arrays (completed dimmed, in-progress bordered), (c) figure is
+  serializable (returns a `go.Figure`).
+- **Repaint discipline**: builder purity test — the same (entries, t)
+  always yields the same figure data; a paced pass repaints at the
+  constant slot (counting spy asserts ≥1 plotly paint per pass).
+- **Page-invariant test (the double-box lesson)**: render() in every
+  state emits the same element sequence for the live lane — clock slot,
+  gantt slot, log stanza; ZERO conditional elements above the gantt;
+  no `st.info`/free `st.caption` between slots.
+- **Regression**: log painter invariants (single surface, tail/full
+  split) and scripted-lane determinism tests stay green untouched.
+- Quick gate green; no solver-time regressions (board read is a
+  straight SELECT — reuse, no new solve paths).
+
+## 8. Acceptance criteria
+
+1. Live-paced day: board visible immediately after Resume; bar colours
+   read job identity; completed ops dim behind the moving marker;
+   in-progress draws an amber border.
+2. A narrative mid-flight: solve at frozen t; the board re-lays out from
+   the NEW active version only *after t* (history bars identical);
+   clock never rewinds; log box untouched during the solve.
+3. The board never vanishes or duplicates across paced rerenders
+   (constant slot path; repaint-per-pass); a recovery commit shows the
+   re-laid board immediately on the next pass.
+4. Day end: final board remains; the before→final diff figure appears
+   below it (reused `_render_diff`; option A).
+5. Scripted lane: same board present; byte-reproducible lane unchanged
+   (existing determinism regression stays green).
+6. Tree-stable page invariant test green (no conditional elements in
+   the clock/gantt/log sequence in any state).
+7. Quick gate (`pytest -m "not mqtt and not slow"`) green.
+
+## 9. Amendment A1 (2026-09-18, user-ruled): pacing, unified log, day-end diff pair
+
+Normative after the accepted-spec review round; answers user observations
+on the scripted lane's post-launch behavior.
+
+1. **The clock follows the events, not the last ingest** — a scripted
+   event at t=380 (NARRATIVE/recovery included) updates the page clock
+   even though the chunk kind is `recovery`; the walk's sim_clock must
+   equal the last event's authored time at terminus (the t=330 freeze is
+   a defect, not semantics).
+2. **Pacing is user speed, always**: between two authored events the
+   board's clock interpolates across the event gap at the chosen speed
+   (dwell seconds = gap_minutes / N; instant = jump). Event/recovery
+   increments only happen on the EVENT chunks (clock "pauses" while a
+   solve runs — same mid-flight contract as the live lane). Page-level
+   only; the engine walk stays byte-reproducible (A spec §3b) — the
+   pacing is performed on page-level state keys, no engine change.
+3. **Unified log schema across both lanes** (YAGNI the two formats):
+   every log line is
+   `[t=…<4] done=N running=M · <detail>`
+   where done/running come from the committed entries classified at t
+   (same classification as the board). Live completion ticks drop the
+   old "tick" word (their detail was the numbers themselves); scripted
+   ingest/recovery/⏳ lines keep their detail text and gain the state
+   numbers. The log painter, dedup keys, lane-scoped feeds (2026-09-16
+   fixes) are unchanged.
+4. **Schedule transition shows initial AND final**: `_render_diff`
+   renders the before frame FIRST and the final frame SECOND (two charts)
+   — the deltas visible side-by-side.
+
+## 10. Amendment A2 (2026-09-18, user-ruled): scripted replay =
+## live-day parity on the page
+
+Supersedes §9.2 (event-gap interpolation). The user's ruling: "scripted
+replay must have the same exact behaviour that live day already has"
+(+ keep the richer event/disruption log). Normative definition of the
+contract, effective on both lanes' REP4302K wiring:
+
+### 10.1 Behavior contract (scripted lane adopts live-day semantics)
+
+- **Display owns the clock.** The walk engine's chunk stream is
+  unchanged (byte-reproducible lane, deterministic commit chain, §3b);
+  the PAGE owns a display clock that sweeps 0 → **makespan of the
+  played board** (not the last event time), at the user's speed:
+  dwell seconds = boundary_gap / N, instant = jump. One terminator per
+  rerender dwell — same controller shape as the live paced lane.
+- **Authored events pause the clock mid-flight**: when the display
+  clock crosses an authored event minute (fails machine, material,
+  worker, narrative), the sweep pauses, the engine consumes/ingests the
+  event, logs, and (auto_recover on) the solve runs; the ⏳ line paints
+  the moment the solve begins (commit aa6bd98 semantics); the new
+  version commits, the board after t re-lays, and the sweep continues
+  from the same display minute. Clock does not rewind (§4 existing).
+- **Day end = board horizon, not last event**: after the last authored
+  event's solve commits, the clock keeps sweeping to the final active
+  version's makespan; every op dims behind the marker; then day_end
+  (the t=330/380 stale-clock freeze — the pending-jobs-near-400 defect —
+  dies by construction).
+- **Log unification (upgrades §9.3)**: both lanes emit
+  `[t=<4width>] done=N running=M · <detail>`
+  where done/running are derived from the SAME committed-entry
+  classification the board uses (pure, read-only). Live tick lines lose
+  the word "tick" (the state numbers ARE the tick's detail); scripted
+  ingest/recovery/⏳ lines keep their detail text and add the numbers.
+- **Terminus rail line** cites the day-end clock (the walker's
+  `rail_line` at the makespan sweep end), not the last ingest time.
+
+### 10.2 Unchanged by this amendment
+
+- `walk_timeline` (engine chunk stream, commit chain, seeds) — untouched.
+- `live_day` and the live lane controller — already the reference shape;
+  the scripted page arm migrates to the same display mechanics (board
+  classify at display-t, one board+log paint per pass, pause/resume
+  semantics).
+- The scripted lane's resume (`sim_last_idx`) and idempotent re-run
+  behavior — untouched.
+- Timeline-lane determinism pins (`test_replay_idempotent_and_
+  deterministic`): log-format change (§10.3) is page-side; the engine
+  chunk stream (and therefore the commit-chain determinism assert) is
+  untouched.
+
+### 10.3 Acceptance (amend)
+
+8. Scripted replay at N× paces the board clock continuously between
+   authored events AND sweeps out to the board horizon after the last
+   event; instant jumps boundary-to-boundary. Clock never teleports
+   (no ≥gap jumps at non-instant speeds) and never freezes behind the
+   board (no ops stranded future-of the marker at day end).
+9. Lanes emit the same log schema; any run's log in scripted lane
+   contains the same event/recovery detail as before the amendment
+   (unified format) and byte-identical replay remains green.
+
+## 11. Amendment A3 (2026-09-19, user-ruled): TRUE REUSE — the
+## scripted page lane IS the live walker
+
+Supersedes §10's semantic change overruns. Ruling verbatim: "rip out the
+heart of that live replay simulator and place it in the scripted replay;
+the only difference is one has a text box and the other a file import."
+
+1. The scripted replay's PAGE lane stops having its own pacing clock
+   (DisplayClock/sweep sim_display_t removed). The scripted lane driver:
+   `_render_live` (the live lane's controller) driving `live_day` over
+   the scripted fork, with a ScheduledInterruptQueue built from the
+   timeline's authored events.
+2. ScheduledInterruptQueue = thin subclass of InterruptQueue in
+   coe/simulator/live.py: `push_scheduled(t, narrative)` sorted by
+   minute; `pop(t)` yields the earliest event narrated at its minute
+   `t >= scheduled minute`. Authored structured events (MACHINE/
+   WORKER/MATERIAL/NARRATIVE) map 1:1 to deterministic narrative text
+   (`_event_to_narrative` at page) and resolve through the SAME
+   recovery graph the live lane uses — auto-fix (degraded client)
+   default, LLM narration toggle shared. No pacing keys, no pace law —
+   the walker sets the pace.
+3. Interface unification (final): both lanes render
+   [st.metric("Day clock")][gantt][input seam][log]. `_paint_board` no
+   longer owns a clock caption (the metric hero carries the minute).
+   The ONLY element difference between lanes: live = chat input seam;
+   scripted = none on main (timeline import lives in the sidebar).
+   St.info/st.subheader stay off the main page; day-end notices ride in
+   the log stanza caption slot.
+4. Auto-recover toggle is retired (the scripted lane's events now fire
+   exactly like typed narrations: always recover, auto-fix unless the
+   narration toggle is on — same as live). walk_timeline/CLI `simulate
+   timeline` (the deterministic artifact lane) is untouched and remains
+   the reproducible benchmark surface outside the page.
+5. Acceptance: opening the two page lanes yields the same element
+   sequence except the input card; page logs format/flow are the same
+   walker's (one chunk per pass, live dwell); day ends at horizon.

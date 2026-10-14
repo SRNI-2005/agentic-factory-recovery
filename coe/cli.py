@@ -274,6 +274,110 @@ def _run_benchmark(args, client=None) -> None:
           "-> benchmark_report.json")
 
 
+def _run_simulate(args) -> None:
+    """simulate timeline: clone (default) -> engine walk -> print feed."""
+    import uuid
+
+    from pydantic import ValidationError
+
+    from coe.simulator.engine import walk_timeline
+    from coe.simulator.timeline import TimelineError, load_timeline
+
+    try:
+        tl = load_timeline(args.file)
+    except TimelineError as exc:
+        raise SystemExit(f"timeline rejected: {exc}")
+    except ValidationError as exc:
+        # Deviation vs brief: pydantic schema violations surface as
+        # ValidationError, not TimelineError — both must exit cleanly.
+        err = exc.errors()[0]
+        loc = ".".join(str(p) for p in err["loc"])
+        raise SystemExit(f"timeline rejected: {loc}: {err['msg']}")
+    if args.auto_recover is not None:
+        # CLI override: None (= use the timeline's field) passes through.
+        tl.auto_recover = args.auto_recover
+    from coe.config import get_settings
+
+    s = get_settings()
+    speed = args.speed or f"{s.simulate_default_speed}"
+    if speed != "instant":
+        try:
+            if int(speed) <= 0:
+                raise ValueError(speed)
+        except ValueError:
+            raise SystemExit(
+                f"invalid speed: {speed} (instant or a positive integer)")
+    inst_name = args.instance or "factory_demo_01"
+    # Pre-flight (order matters): unknown instance first, then the
+    # narrative baseline requirement (§4.4).
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.session import make_engine
+
+    with Session(make_engine()) as session:
+        known = session.execute(text(
+            "SELECT COUNT(*) FROM instances WHERE name = :n"),
+            {"n": inst_name}).scalar_one()
+        if known == 0:
+            raise SystemExit(f"unknown instance: {inst_name}")
+        if any(ev.kind == "NARRATIVE" for ev in tl.events):
+            n = session.execute(text(
+                "SELECT COUNT(*) FROM schedule_versions sv "
+                "JOIN instances i ON i.id = sv.instance_id "
+                "WHERE i.name = :n AND sv.solver_status IN "
+                "('OPTIMAL','FEASIBLE') AND sv.rolled_back = false"),
+                {"n": inst_name}).scalar_one()
+            if n == 0:
+                raise SystemExit(
+                    f"`{inst_name}` has no active schedule — run "
+                    f"`uv run python -m coe.cli solve baseline --instance "
+                    f"{inst_name}` first (narrative events freeze from it,"
+                    " §4.4)")
+    want_clone = s.simulate_clone if args.on_clone is None else args.on_clone
+    if want_clone:
+        from sqlalchemy.orm import Session
+
+        from sqlalchemy.exc import NoResultFound
+
+        from coe.db.models.provenance import Instance
+        from coe.db.session import make_engine
+        from coe.services.fork import ForkError, fork_instance
+
+        with Session(make_engine()) as session:
+            try:
+                source = (session.query(Instance)
+                          .filter(Instance.name == inst_name).one())
+            except NoResultFound:
+                raise SystemExit(
+                    f"unknown instance: {inst_name} — source must exist "
+                    "to fork")
+            try:
+                forked = fork_instance(
+                    session, source,
+                    new_name=f"sim-{tl.name}@{uuid.uuid4().hex[:8]}")
+            except ForkError as exc:
+                # Deviation vs brief: fork collision also exits as
+                # SystemExit(str), never a traceback.
+                raise SystemExit(f"fork failed: {exc}")
+            session.commit()
+            inst_name = forked.name
+    print(f"simulating '{tl.name}' on {inst_name} at {speed}")
+    if not args.llm:
+        # Agentic steps run without any LLM (auto-fix: solver-only
+        # re-plan) — the degraded client answers translate/strategy/
+        # explain deterministically, behind the same protocol.
+        from coe.agents.degraded_client import DegradedLLMClient
+
+        factory = lambda: DegradedLLMClient()  # noqa: E731
+    else:
+        factory = None      # None = live provider (execute_recovery §9)
+    for chunk in walk_timeline(tl, instance_name=inst_name, speed=speed,
+                               llm_client_factory=factory,
+                               start_index=args.from_index):
+        print(f"[{chunk.get('t', '—'):>4}] {chunk}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="coe", description="COE factory recovery system")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -360,6 +464,29 @@ def build_parser() -> argparse.ArgumentParser:
     bf.add_argument("--corpus", required=True)
     bf.add_argument("--seed", type=int, default=None)
 
+    sim = sub.add_parser("simulate",
+                         help="replay a scripted disruption day")
+    sim_sub = sim.add_subparsers(dest="simulate_cmd", required=True)
+    st_ = sim_sub.add_parser("timeline")
+    st_.add_argument("--file", required=True)
+    st_.add_argument("--speed", default=None)
+    st_.add_argument("--from", dest="from_index", type=int, default=0)
+    st_.add_argument("--instance", default=None)
+    st_.add_argument("--on-clone", dest="on_clone", action="store_true",
+                     default=None)
+    st_.add_argument("--llm", action=argparse.BooleanOptionalAction,
+                     default=False,
+                     help="use the live LLM for agentic steps (default: "
+                          "off = deterministic auto-fix, solver-only "
+                          "re-plan)")
+    st_.add_argument("--auto-recover",
+                     dest="auto_recover",
+                     action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help="run a full recovery solve after every "
+                          "structured disruption event (default: the "
+                          "timeline's auto_recover field)")
+
     mq = sub.add_parser("mqtt")
     mq_sub = mq.add_subparsers(dest="mqtt_cmd", required=True)
     mq_sub.add_parser("listen")
@@ -379,6 +506,18 @@ def build_parser() -> argparse.ArgumentParser:
     ts.add_argument("--instance", default="factory_demo_01")
     ts.add_argument("--sku", default="MAT-001")
     ts.add_argument("--at", type=int, default=300)
+
+    tr = mq_sub.add_parser("test-return",
+                            help="phone-back: worker is available again")
+    tr.add_argument("--instance", default="factory_demo_01")
+    tr.add_argument("--worker", default="W3")
+    tr.add_argument("--at", type=int, default=530)
+
+    tre = mq_sub.add_parser("test-restock",
+                             help="supplier delivery arrives (telemetry only)")
+    tre.add_argument("--instance", default="factory_demo_01")
+    tre.add_argument("--sku", default="MAT-001")
+    tre.add_argument("--at", type=int, default=300)
 
     dash = sub.add_parser("dashboard", help="launch the Streamlit cockpit")
     dash.add_argument("--port", type=int, default=8501)
@@ -493,6 +632,9 @@ def main(argv=None) -> None:
     elif args.group == "benchmark":
         if args.benchmark_cmd == "fidelity":
             _run_benchmark(args)
+
+    elif args.group == "simulate":
+        _run_simulate(args)
 
     elif args.group == "mqtt":
         if args.mqtt_cmd == "listen":
@@ -610,6 +752,90 @@ def main(argv=None) -> None:
                     print(f"OK: MATERIAL_SHORTAGE stored once ({mid})")
                     raise SystemExit(0)
                 raise SystemExit("FAIL: shortage not ingested within 5s")
+            finally:
+                handle.stop()
+
+        if args.mqtt_cmd == "test-return":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_resource_event
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            try:
+                mid = publish_resource_event(
+                    instance_name=args.instance, resource_kind="WORKER",
+                    resource_id=args.worker, event_type="WORKER_RETURN",
+                    occurred_at=args.at, severity="LOW",
+                    reason="cli_proof_return",
+                )
+                deadline = time.time() + 5
+                engine = make_engine()
+                found = False
+                while time.time() < deadline and not found:
+                    with engine.begin() as c:
+                        n = c.execute(text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid "
+                            "AND te.event_type = 'WORKER_RETURN'"),
+                            {"inst": args.instance, "mid": mid}).scalar_one()
+                        avail = c.execute(text(
+                            "SELECT count(*) FROM workers wk "
+                            "JOIN instances i ON wk.instance_id = i.id "
+                            "WHERE i.name = :inst AND wk.name = :w "
+                            "AND wk.status = 'AVAILABLE' AND NOT EXISTS ("
+                            "SELECT 1 FROM worker_absence_windows w "
+                            "WHERE w.instance_id = i.id AND w.worker_id = "
+                            "wk.id AND w.absence_until IS NULL)"),
+                        {"inst": args.instance, "w": args.worker}).scalar_one()
+                    found = n == 1 and avail == 1
+                    if not found:
+                        time.sleep(0.25)
+                if found:
+                    print(f"OK: WORKER_RETURN stored once and no open "
+                          f"absence remains ({mid})")
+                    raise SystemExit(0)
+                raise SystemExit("FAIL: return not fully ingested within 5s")
+            finally:
+                handle.stop()
+
+        if args.mqtt_cmd == "test-restock":
+            import time
+
+            from coe.db.session import make_engine
+            from coe.mqtt.edge_stub import publish_resource_event
+            from coe.mqtt.subscriber import run_subscriber
+            from sqlalchemy import text
+
+            handle = run_subscriber()
+            try:
+                mid = publish_resource_event(
+                    instance_name=args.instance, resource_kind="MATERIAL",
+                    resource_id=args.sku, event_type="MATERIAL_RESTOCK",
+                    occurred_at=args.at, severity="LOW",
+                    reason="cli_proof_restock",
+                )
+                deadline = time.time() + 5
+                engine = make_engine()
+                found = False
+                while time.time() < deadline and not found:
+                    with engine.begin() as c:
+                        n = c.execute(text(
+                            "SELECT count(*) FROM telemetry_events te "
+                            "JOIN instances i ON i.id = te.instance_id "
+                            "WHERE i.name = :inst AND te.message_id = :mid "
+                            "AND te.event_type = 'MATERIAL_RESTOCK'"),
+                            {"inst": args.instance, "mid": mid}).scalar_one()
+                    found = n == 1
+                    if not found:
+                        time.sleep(0.25)
+                if found:
+                    print(f"OK: MATERIAL_RESTOCK stored once ({mid})")
+                    raise SystemExit(0)
+                raise SystemExit("FAIL: restock not ingested within 5s")
             finally:
                 handle.stop()
 
