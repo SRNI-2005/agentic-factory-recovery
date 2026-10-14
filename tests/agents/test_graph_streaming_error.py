@@ -44,8 +44,16 @@ class TestStreamingExceptionHandling:
         final = [i for i in items if "status" in i]
         assert len(final) == 1
         assert final[0]["status"] == "STREAMING_ERROR"
-        assert "LLM client exploded" in str(final[0].get("state", "")), \
-            f"unexpected state: {final[0].get('state')}"
+        # state is a RecoveryState (not str); error recorded in DB record_json
+        from sqlalchemy import text
+        from coe.db.session import make_engine
+        engine = make_engine()
+        with engine.begin() as c:
+            err = c.execute(text(
+                "SELECT disruption_record_json::text FROM recovery_runs "
+                "WHERE status='STREAMING_ERROR' ORDER BY id DESC LIMIT 1"
+            )).scalar_one()
+        assert "LLM client exploded" in err
         # Run must be recorded
         from sqlalchemy import text
         from coe.db.session import make_engine

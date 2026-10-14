@@ -16,7 +16,11 @@ def active(session: Session, instance_id: int) -> GanttOut | None:
         return None
     entries = session.execute(text(
         "SELECT se.*, m.name AS machine_name, j.name AS job_name, "
-        "       o.sequence_number, w.name AS worker_name "
+        "       o.sequence_number, w.name AS worker_name, "
+        "       (SELECT string_agg(mt.sku, ', ') FROM operation_bom ob "
+        "        JOIN materials mt ON mt.id = ob.material_id "
+        "        WHERE ob.instance_id = se.instance_id "
+        "        AND ob.operation_id = se.operation_id) AS material_skus "
         "FROM active_schedule asev "
         "JOIN schedule_entries se ON se.id = asev.id "
         "JOIN machines m ON m.id = se.machine_id "

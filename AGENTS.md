@@ -17,11 +17,13 @@ Agents own semantics (translate/propose/explain); deterministic solvers own math
 ```bash
 docker compose up -d        # REQUIRED before db/mqtt tests or any DB work (TimescaleDB :5432, Mosquitto :1883, coe/coe/coe)
 uv run pytest -q                          # full suite incl slow pins (~220 tests, ~5 min)
-uv run pytest -m "not mqtt and not slow"  # QUICK GATE (~214 tests, ~2.5 min) - use this during development
+uv run pytest -m "not mqtt and not slow"  # QUICK GATE (~511 tests, ~8 min) - use this during development
 uv run pytest -m "not mqtt"               # skip broker-dependent tests only
 
 uv run python -m coe.cli db reset        # DESTRUCTIVE: drops user tables, re-runs all migrations
-uv run python -m coe.cli import mk01     # also: import hutter --path FILE | --dir DIR, import gass
+uv run python -m coe.cli import mk01     # also: import gass
+uv run python -m coe.cli import hutter --dir data/raw/nouri-fjspw/extracted/MFJW   # MFJW-05/06/07 reject as corrupted (expected)
+uv run python -m coe.cli import hutter --dir data/raw/nouri-fjspw/extracted/SFJW
 uv run python -m coe.cli scenario build --name factory_demo_01 --seed 42
 uv run python -m coe.cli solve baseline --instance factory_demo_01   # also: solve recovery --instance I --failed-machine M1 [--at T]
 uv run python -m coe.cli machine restore --instance I --machine M1   # reopen failed machine (closes downtime window)
@@ -31,17 +33,20 @@ uv run python -m coe.cli recover --instance I --narrative "..." [--at MIN]
 uv run python -m coe.cli explain --instance I
 uv run python -m coe.cli benchmark fidelity --corpus data/corpus/fidelity-seed42 --seed 42
 uv run python -m coe.cli mqtt listen
+uv run python -m coe.cli simulate timeline --file data/timelines/demo_day_01.json [--speed instant|10|30|60] [--on-clone]   # clone is default-on (disable via settings.simulate_clone); run `solve baseline` on the source instance first
+Simulate page: Live day (default; typed mid-flight disruptions + live machines×time board) and Scripted replay (JSON; reproducible) modes. Scripted replay now paces like Live day (clock → board horizon).
 ```
 
 Use `uv` exclusively. Never pip, never system Python. Working from repo root is assumed (paths in tests are CWD-relative).
 
 ## Architecture
 
-- `coe/db/` — SQLAlchemy 2.0 models + Alembic migrations (6 migrations; **Alembic is authoritative DDL — `create_all` is forbidden**). Raw SQL only for TimescaleDB-specific ops (hypertable, advisory locks).
+- `coe/db/` — SQLAlchemy 2.0 models + Alembic migrations (9 migrations; **Alembic is authoritative DDL — `create_all` is forbidden**). Raw SQL only for TimescaleDB-specific ops (hypertable, advisory locks).
 - `coe/parsers/` — MK01 (Brandimarte), Nouri (FJSSP-W worker flexibility), GASS (xlsx → instance_profiles). Each import is atomic, checksum-idempotent (changed checksum ⇒ new `name@<8hex>` instance).
 - `coe/scenario/` — seeded deterministic builder: `factory_demo_01` = 30 jobs / 8 machines / 168 ops sampled from MK01-derived profiles + Nouri worker layer + GASS setups + synthetic materials. Byte-reproducible for a given seed.
 - `coe/mqtt/` — kind-routed ingestion: MACHINE (downtime windows + FAILED status), WORKER (absence windows + UNAVAILABLE, RETURN closes), MATERIAL (telemetry only). All events idempotent on `message_id`; interval unions under per-resource advisory locks; subscriber validates topic ≡ payload.
 - `coe/solver/` — deterministic CP-SAT engine (ortools): payload_builder → horizon → model build → solve → invariants → committer (versioned schedules, rollback). Materials via receipts reservoir (stock-only capacity; defer-to-delivery). Two-phase warm start: relax → hint → repair w/ greedy fallback (`_greedy_plan`). Suspension memory: jobs.status=BLOCKED + suspended_jobs root + job mirror in payload.
+- `coe/simulator/` — deterministic scripted-day engine ("fast clock"): authored timeline JSON (loader + pydantic schema) → engine walk driving the real ingestion path (structured events) and real Phase 3 recovery graph (NARRATIVE events, workers pinned to 1), pacing instant/N×, resume by run-log index, `--on-clone` isolation (`sim-<script>@<8hex>`), RESTOCK receipts + `material_transactions` ledger rows.
 - **Workers knob:** default 8 (speed-first); set workers=1 for any determinism consumer (mk01 benchmark pin, byte-determinism property, audit regeneration).
 
 Every table row is instance-scoped (`instance_id` FK discipline — no cross-instance joins). All time is integer minutes (shift=480, day=1440).
@@ -61,3 +66,32 @@ Every table row is instance-scoped (`instance_id` FK discipline — no cross-ins
 - Scenario builds refuse duplicate names; rebuild requires reset first.
 - Ports are loopback-bound (127.0.0.1) — dev-only anonymous Mosquitto + coe/coe/coe DB creds; never deploy as-is.
 - Engine limits: factory-scale solves are FEASIBLE-at-cap (hint-quality); proven-OPTIMAL only on small/pure instances (MK01 pin). Recovery solves default 180s floor.
+
+## Restarting the dashboard (live-server hygiene)
+
+The dashboard process command is `python -m coe.cli dashboard` — kill with
+`pkill -f "coe.cli dashboard"` (NOT `pkill -f "streamlit run"`, which does not
+match the wrapper and silently leaves the old server bound to the port). After
+restarting, VERIFY freshness: `lsof -nP -iTCP:8501 -sTCP:LISTEN` + `ps -o pid,lstart -p <pid>`
+— a 200 from a stale process looks exactly like success. Bit this session
+twice (2026-09-12/13) behind the ImportError investigation below.
+
+## Stale bytecode cache (rare, loud when wrong)
+
+Symptom: `ImportError: cannot import name 'X' from '<module>'` despite the
+function existing in the source file — even after restart. Cause: a `__pycache__/*.pyc`
+file whose mtime stamps NEWER than the source (a killed subprocess or
+watchdog race wrote the cache post-edit), so Python never reopens the changed
+source. Fix: `find coe tests -name __pycache__ -type d -exec rm -rf {} +` then
+restart. Never debug a fresh failing import before nuking caches first — this
+exact failure bit the day-simulator session (2026-09-12).
+
+## Single dev DB hazard: pytest wipes your demo data
+
+pytest owns a DEDICATED test database on :5433 (`timescaledb-test`, db coe —
+tests/conftest.py overrides `DATABASE_URL` before any coe import; CI-style
+override via TEST_DATABASE_URL). The interactive demo DB (:5432) is therefore
+never touched by test batches. History: before the separation, `clean_db`
+truncated the SHARED DB and pytest batches erased live demo schedules
+(vanishing-baseline reports on 2026-09-13 — collision between test batches and
+manual simulator runs). `docker compose up -d` brings up both DBs.

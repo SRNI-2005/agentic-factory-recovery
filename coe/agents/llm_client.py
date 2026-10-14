@@ -36,7 +36,16 @@ class _LangChainClient:
 
         msg = self._model.invoke(
             [SystemMessage(content=system), HumanMessage(content=user)])
-        return msg.content
+        content = msg.content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and "text" in block:
+                    parts.append(block["text"])
+            content = "".join(parts)
+        return content or ""
 
 
 def make_llm_client(settings=None) -> LLMClient:
@@ -54,7 +63,10 @@ def make_llm_client(settings=None) -> LLMClient:
     if provider in ("gemini", "google"):
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        kwargs = {}
+        if s.google_api_key:
+            kwargs["api_key"] = s.google_api_key
         return _LangChainClient(ChatGoogleGenerativeAI(
-            model=s.llm_model, temperature=s.llm_temperature))
+            model=s.llm_model, temperature=s.llm_temperature, **kwargs))
     raise LLMConfigError(f"unsupported LLM_PROVIDER {provider!r} "
                          "(supported: openai, gemini)")

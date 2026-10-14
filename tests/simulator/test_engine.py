@@ -1,0 +1,361 @@
+# tests/simulator/test_engine.py
+"""Task 6: engine walker — scripted-day playback through shared entry
+points (spec §5). Structured events reuse Phase 1 ingestion; NARRATIVE
+events run the real recovery graph with a fake LLM client."""
+import hashlib
+import json
+import subprocess
+
+import pytest
+
+pytestmark = pytest.mark.db
+
+from tests.fixtures.llm.fake_client import FakeLLMClient
+
+NARRATIVE = "MC-04 gearbox seized, sparks everywhere"
+# MC-04 binds (unique digit match) to M4 among machines M0..M7
+GOOD_MACHINE = {
+    "kind": "MACHINE", "instance_id": "factory_demo_01",
+    "machine_id": "M4", "event_type": "FAILURE", "occurred_at": 512,
+    "severity": "HIGH", "estimated_downtime": 90,
+    "narrative_excerpt": NARRATIVE,
+}
+
+_STRATEGY = '{"candidates": [], "final": true}'
+_EXPLAIN = "M4 failed; work rerouted to capable alternatives."
+
+
+def _canned_disruption() -> str:
+    return json.dumps(GOOD_MACHINE)
+
+
+def _timeline(path, events, auto_recover=False):
+    # Existing structured-only tests authored BEFORE the auto_recover
+    # amendment (2026-09-13) keep today's facts-only semantics explicitly;
+    # the auto behavior is covered in test_auto_recover.py.
+    data = {"name": "t1", "seed": 42, "horizon_days": 1, "events": events,
+            "auto_recover": auto_recover}
+    p = path / "t.json"
+    p.write_text(json.dumps(data))
+    return str(p)
+
+
+def _simul_count() -> int:
+    from sqlalchemy import text
+
+    from coe.db.session import make_engine
+
+    with make_engine().begin() as c:
+        return c.execute(text(
+            "SELECT COUNT(*) FROM telemetry_events te "
+            "JOIN instances i ON i.id=te.instance_id "
+            "WHERE i.name='factory_demo_01' "
+            "AND te.message_id LIKE 'simul-%'")).scalar()
+
+
+def test_structured_event_ingests_through_shared_path(tmp_path, demo_scenario):
+    from coe.simulator.engine import walk_timeline
+
+    tl_path = _timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"}])
+    items = list(walk_timeline(tl_path, instance_name="factory_demo_01",
+                               speed="instant"))
+    assert _simul_count() >= 1
+    assert any(i.get("event") == "done" for i in items)
+
+
+@pytest.mark.slow
+def test_narrative_event_runs_graph_commit(tmp_path, demo_scenario):
+    from coe.simulator.engine import walk_timeline
+
+    def fake_factory():
+        return FakeLLMClient([_canned_disruption(), _STRATEGY, _EXPLAIN])
+
+    items = list(walk_timeline(
+        _timeline(tmp_path, [
+            {"t": 100, "kind": "NARRATIVE",
+             "text": "M3 gearbox seized", "severity": "HIGH"}]),
+        instance_name="factory_demo_01", speed="instant",
+        llm_client_factory=fake_factory))
+    committed = [c["committed"] for c in items if c.get("event") == "done"]
+    assert committed and len(committed[0]) >= 1   # at least one recovery version
+
+
+@pytest.mark.slow
+def test_narrative_walk_replay_chain_deterministic(tmp_path, demo_scenario):
+    """§9.2 evidence: replays committed chains deterministically.
+
+    Walks a (structured + NARRATIVE) timeline TWICE — each walk on its OWN
+    fresh fork of factory_demo_01 (same starting DB state), each baseline-
+    solved with workers=1 (determinism knob) and fed a     fresh FakeLLMClient
+    with the SAME canned response sequence — then compares the two clones'
+    committed schedule_versions chains. payload_json and the stored
+    payload_hash are instance-scoped (clone name + parent_version_id), so
+    the hash compared is computed over the payload with those two
+    clone-scoped fields removed; every other column matches byte-for-byte."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.db.models.provenance import Instance
+    from coe.db.session import make_engine
+    from coe.services.fork import fork_instance
+    from coe.simulator.engine import walk_timeline
+
+    script = _timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"},
+        {"t": 200, "kind": "NARRATIVE", "text": NARRATIVE,
+         "severity": "HIGH"}])
+
+    def _fresh_fork() -> str:
+        with Session(make_engine()) as s:
+            source = (s.query(Instance)
+                      .filter(Instance.name == "factory_demo_01").one())
+            forked = fork_instance(s, source)
+            s.commit()
+            clone = forked.name
+        # recovery commits only against an active schedule; both walks must
+        # start from the same DB state (fork + one deterministic baseline)
+        r = subprocess.run(
+            ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
+             "--instance", clone, "--workers", "1"],
+            check=True, capture_output=True, text=True, timeout=900)
+        assert r.returncode == 0, r.stderr
+        return clone
+
+    def _canned_responses(instance_name: str) -> list[str]:
+        # GOOD_MACHINE-shaped record bound to THIS clone (translate
+        # validates record.instance_id against the target instance);
+        # duplicated copies absorb any translate retry round — FakeLLMClient
+        # pops sequentially, unused entries are simply ignored.
+        record = dict(GOOD_MACHINE, instance_id=instance_name)
+        return ([json.dumps(record)] * 2
+                + [_STRATEGY] * 2 + [_EXPLAIN])
+
+    def _chain(clone_name) -> list[tuple]:
+        with Session(make_engine()) as s:
+            iid = (s.query(Instance)
+                   .filter(Instance.name == clone_name).one().id)
+        with make_engine().begin() as c:
+            rows = c.execute(text(
+                "SELECT version_number, schedule_type, solver_status, "
+                "makespan, payload_hash, payload_json FROM schedule_versions "
+                "WHERE instance_id = :iid ORDER BY version_number"),
+                {"iid": iid}).all()
+        out = []
+        for r in rows:
+            payload = dict(r.payload_json)
+            # clone-scoped bookkeeping: the instance's own name and its
+            # internal version ids (parent_version_id points at THIS
+            # clone's baseline); the stored payload_hash column covers
+            # those raw fields, so we hash the normalized form instead.
+            payload.pop("instance_id", None)
+            payload.pop("parent_version_id", None)
+            out.append(r[:4] + (hashlib.sha256(
+                json.dumps(payload, sort_keys=True).encode()).hexdigest(),))
+        return out
+
+    chains = []
+    for _ in range(2):
+        clone = _fresh_fork()
+        items = list(walk_timeline(
+            script, instance_name=clone, speed="instant",
+            llm_client_factory=lambda: FakeLLMClient(
+                _canned_responses(clone))))
+        assert any(i.get("event") == "done" for i in items)
+        chain = _chain(clone)
+        assert chain, f"{clone}: replay walk committed no versions"
+        chains.append(chain)
+
+    assert chains[0] == chains[1], (
+        f"replay chains diverged:\n{chains[0]}\n{chains[1]}")
+
+
+def test_resume_skips_completed_prefix(tmp_path, demo_scenario):
+    """start_index=k suppresses events < k (already persisted)."""
+    from coe.simulator.engine import walk_timeline
+
+    script = _timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"},
+        {"t": 150, "kind": "WORKER", "event_type": "WORKER_ABSENT",
+         "worker_id": "W3", "duration": 60}])
+    first = list(walk_timeline(script, instance_name="factory_demo_01",
+                               speed="instant"))
+    assert [i["idx"] for i in first if i["event"] == "ingest"] == [0, 1]
+    before = _simul_count()
+    second = list(walk_timeline(script, instance_name="factory_demo_01",
+                                speed="instant", start_index=1))
+    assert [i["idx"] for i in second if i["event"] == "ingest"] == [1]
+    assert _simul_count() == before   # first event not re-executed
+
+
+def test_replay_idempotent_and_deterministic(tmp_path, demo_scenario):
+    from coe.simulator.engine import walk_timeline
+    from sqlalchemy import text
+
+    from coe.db.session import make_engine
+
+    script = str(_timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"},
+        {"t": 150, "kind": "WORKER", "event_type": "WORKER_ABSENT",
+         "worker_id": "W3", "duration": 60},
+        {"t": 200, "kind": "MATERIAL", "event_type": "MATERIAL_RESTOCK",
+         "sku": "MAT-001", "quantity": 40}]))
+    first = list(walk_timeline(script, instance_name="factory_demo_01",
+                               speed="instant"))
+    # deterministic message ids: replay everything, count ids
+    with make_engine().begin() as c:
+        ids = [r[0] for r in c.execute(text(
+            "SELECT DISTINCT te.message_id FROM telemetry_events te "
+            "JOIN instances i ON i.id=te.instance_id "
+            "WHERE i.name='factory_demo_01' AND te.message_id "
+            "LIKE 'simul-%'")).all()]
+    assert len(ids) == 3          # one per scripted structured event
+    second = list(walk_timeline(script, instance_name="factory_demo_01",
+                                speed="instant", start_index=2))
+    assert any(c.get("event") == "done" for c in second)
+    assert second[-1]["committed"] == []   # nothing re-executed post-prefix
+    with make_engine().begin() as c:
+        ids2 = [r[0] for r in c.execute(text(
+            "SELECT DISTINCT te.message_id FROM telemetry_events te "
+            "JOIN instances i ON i.id=te.instance_id "
+            "WHERE i.name='factory_demo_01' "
+            "AND te.message_id LIKE 'simul-%'")).all()]
+    assert ids2 == ids                    # no duplicates on replay
+
+
+def test_full_replay_does_not_rematerialize_restock(tmp_path, demo_scenario):
+    """Regression: restock materialization is gated on ingest `created`,
+    so a full replay (start_index=0) leaves the RESTOCK ledger and
+    receipts reservoir byte-for-byte in count unchanged."""
+    from coe.simulator.engine import walk_timeline
+    from sqlalchemy import text
+
+    from coe.db.session import make_engine
+
+    script = str(_timeline(tmp_path, [
+        {"t": 100, "kind": "MACHINE", "event_type": "FAILURE",
+         "machine_id": "M3"},
+        {"t": 150, "kind": "MATERIAL", "event_type": "MATERIAL_RESTOCK",
+         "sku": "MAT-001", "quantity": 40}]))
+    list(walk_timeline(script, instance_name="factory_demo_01",
+                       speed="instant"))
+
+    def _counts():
+        with make_engine().begin() as c:
+            restocks = c.execute(text(
+                "SELECT COUNT(*) FROM material_transactions mt "
+                "JOIN instances i ON i.id=mt.instance_id "
+                "WHERE i.name='factory_demo_01' "
+                "AND mt.transaction_type='RESTOCK'")).scalar()
+            receipts = c.execute(text(
+                "SELECT COUNT(*) FROM material_receipts mr "
+                "JOIN instances i ON i.id=mr.instance_id "
+                "WHERE i.name='factory_demo_01' "
+                "AND mr.source='simulate'")).scalar()
+        return restocks, receipts
+
+    restocks, receipts = _counts()
+    assert (restocks, receipts) == (1, 1)
+    items = list(walk_timeline(script, instance_name="factory_demo_01",
+                               speed="instant", start_index=0))
+    assert [i["created"] for i in items
+            if i.get("event") == "ingest"] == [False, False]
+    assert _counts() == (restocks, receipts)
+
+
+def test_every_chunk_is_render_safe(tmp_path, demo_scenario):
+    """Contract: every non-terminal chunk carries enough keys for any
+    consumer surface (the Simulate page appends event+kind). Defect
+    2026-09-12: the recovery completion chunk lacked `kind` and crashed
+    the page feed."""
+    from coe.simulator.engine import walk_timeline
+
+    gen = walk_timeline(str(_timeline(tmp_path, [
+        {"t": 100, "kind": "NARRATIVE", "text": "M3 gearbox seized",
+         "severity": "HIGH"}])),
+        instance_name="factory_demo_01", speed="instant",
+        llm_client_factory=lambda: FakeLLMClient(
+            [_canned_disruption(), _STRATEGY, _EXPLAIN] * 3))
+    rendered = []
+    for chunk in gen:
+        if chunk["event"] not in ("recovery_start", "done"):
+            assert "kind" in chunk, f"chunk not render-safe: {chunk}"
+        rendered.append(chunk["event"])
+        if chunk["event"] == "done":
+            break
+    assert "recovery_start" in rendered
+    assert "recovery" in rendered   # completes without a page crash
+
+
+def test_degraded_walk_commits_without_llm_traces(tmp_path, demo_scenario):
+    """LLM-narration toggle OFF (default): llm_client_factory returns
+    DegradedLLMClient — the walk commits a recovery version through the
+    real graph with zero recovery_proposals (no strategy candidates,
+    §3.3 no-strategy degradation) and a schedule_explanation row
+    carrying the degraded constant text."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from coe.agents.degraded_client import DegradedLLMClient
+    from coe.db.models.provenance import Instance
+    from coe.db.session import make_engine
+    from coe.services.fork import fork_instance
+    from coe.simulator.engine import walk_timeline
+
+    with Session(make_engine()) as s:
+        source = (s.query(Instance)
+                  .filter(Instance.name == "factory_demo_01").one())
+        forked = fork_instance(s, source)
+        s.commit()
+        clone = forked.name
+    r = subprocess.run(
+        ["uv", "run", "python", "-m", "coe.cli", "solve", "baseline",
+         "--instance", clone, "--workers", "1"],
+        check=True, capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stderr
+
+    script = _timeline(tmp_path, [
+        {"t": 512, "kind": "NARRATIVE", "text": NARRATIVE,
+         "severity": "HIGH"}])
+    items = list(walk_timeline(
+        script, instance_name=clone, speed="instant",
+        llm_client_factory=lambda: DegradedLLMClient()))
+    assert any(i.get("event") == "recovery_start"
+               and i.get("live") is False for i in items)
+    committed = [c["committed"] for c in items if c.get("event") == "done"]
+    assert committed and committed[0], "degraded walk committed nothing"
+
+    with Session(make_engine()) as s:
+        iid = (s.query(Instance)
+               .filter(Instance.name == clone).one().id)
+    with make_engine().begin() as c:
+        proposals = c.execute(text(
+            "SELECT COUNT(*) FROM recovery_proposals WHERE "
+            "instance_id = :iid"), {"iid": iid}).scalar()
+        explanation = c.execute(text(
+            "SELECT se.rationale FROM schedule_explanations se "
+            "JOIN schedule_versions sv ON sv.id = se.version_id "
+            "WHERE sv.instance_id = :iid"), {"iid": iid}).scalar_one_or_none()
+    assert proposals == 0
+    assert explanation is not None
+    assert "LLM disabled" in explanation
+
+
+def test_cli_simulate_llm_flag_default_off():
+    """`simulate timeline --llm/--no-llm` — default is --no-llm (auto-fix
+    per the toggle contract); no live call is made, parser default only."""
+    from coe.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["simulate", "timeline", "--file", "x.json"])
+    assert args.llm is False
+    args = build_parser().parse_args(
+        ["simulate", "timeline", "--file", "x.json", "--llm"])
+    assert args.llm is True
+    args = build_parser().parse_args(
+        ["simulate", "timeline", "--file", "x.json", "--no-llm"])
+    assert args.llm is False

@@ -3,8 +3,17 @@
 ``schedule_frames`` takes two entry lists (the schedule before a recovery
 run and the newly active schedule) and returns a sequence of Plotly
 Gantt figures that visualise the transition step by step.
+
+X-axis is absolute minutes since day-zero (numeric, no timestamp games —
+bars anchor at their start minute and span their duration; defect fix
+2026-09-13: the old chart mixed a timestamp base with an hours-divided
+duration, squeezing the whole day onto a 0..7 axis).
 """
 from __future__ import annotations
+
+import pandas as pd
+
+TS0 = pd.Timestamp("2024-01-01")   # zero-minute origin used by _to_row
 
 
 def _op_key(entry: dict) -> tuple[str, int]:
@@ -50,44 +59,62 @@ def _build_figure(rows: list[dict], *, title: str = ""):
 
     if not visible.empty:
         for task, grp in visible.groupby("Task", sort=False):
+            customdata = [
+                (int((r["Finish"] - TS0).total_seconds() // 60), r["Worker"])
+                for _, r in grp.iterrows()]
             fig.add_trace(go.Bar(
-                x=[(r["Finish"] - r["Start"]).total_seconds() / 60
-                   for _, r in grp.iterrows()],
-                base=[r["Start"] for _, r in grp.iterrows()],
+                x=[int((r["Finish"] - r["Start"]).total_seconds() // 60)
+                   for _, r in grp.iterrows()],   # duration (minutes)
+                base=[int((r["Start"] - TS0).total_seconds() // 60)
+                      for _, r in grp.iterrows()],  # absolute-minute anchor
                 y=[r["Machine"] for _, r in grp.iterrows()],
                 name=task,
                 orientation="h",
-                text=f"{task} ({grp.iloc[0]['Worker']})",
-                textposition="inside",
+                text=task,
+                textposition="none",
+                customdata=customdata,
                 hovertemplate=(
-                    "%{y}<br>%{text}<br>"
-                    "Start: %{base}<br>Duration: %{x} min<extra></extra>"
+                    "%{y}<br>Operation: %{text}<br>"
+                    "Start: %{base} min · End: %{customdata[0]} min · "
+                    "Worker: %{customdata[1]}<extra></extra>"
                 ),
             ))
 
     if not ghosts.empty:
         for task, grp in ghosts.groupby("Task", sort=False):
             fig.add_trace(go.Bar(
-                x=[(r["Finish"] - r["Start"]).total_seconds() / 60
-                   for _, r in grp.iterrows()],
-                base=[r["Start"] for _, r in grp.iterrows()],
+                x=[int((r["Finish"] - r["Start"]).total_seconds() // 60)
+                   for _, r in grp.iterrows()],           # ghost duration
+                base=[int((r["Start"] - TS0).total_seconds() // 60)
+                      for _, r in grp.iterrows()],        # ghost anchor
                 y=[r["Machine"] for _, r in grp.iterrows()],
                 name=task + " (removed)",
                 orientation="h",
                 marker_color="rgba(180,180,180,0.35)",
-                text=f"{task} (removed)",
-                textposition="inside",
+                text=task,
+                textposition="none",
                 hovertemplate=(
                     "%{y}<br>%{text}<br>"
-                    "Start: %{base}<br>Duration: %{x} min<extra></extra>"
+                    "Start: %{base} min<br>Duration: %{x} min<extra></extra>"
                 ),
             ))
 
     fig.update_yaxes(autorange="reversed")
+
+    # Datetime-style ticks (00:00, 01:00, ...) over the MINUTE axis —
+    # visual parity with the Configure page's timeline Gantt.
+    span = max((int((r["Finish"] - TS0).total_seconds() // 60)
+                for r in rows), default=0) + 60
+    ticks = list(range(0, span + 1, 60))
+    fig.update_xaxes(
+        tickvals=ticks,
+        ticktext=[f"{v // 60:02d}:{v % 60:02d}" for v in ticks],
+        range=[0, span],
+    )
     fig.update_layout(
         barmode="overlay",
         title=title or "Schedule diff",
-        xaxis_title="Time",
+        xaxis_title="Time (minutes)",
         yaxis_title="Machine",
         showlegend=False,
     )

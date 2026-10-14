@@ -99,6 +99,11 @@ def commit_solution(session, *, instance_row, payload, solution,
     for b in payload.get("blocked_operations", []):
         ops_by_key[parse_op_id(b["operation_id"])].status = "BLOCKED"
 
+    _write_consume_ledger(session, iid=iid, version=version,
+                          machine_ids=machine_ids, job_ids=job_ids,
+                          worker_ids=worker_ids, ops_by_key=ops_by_key,
+                          solution=solution)
+
     # Suspension memory loop (amendment 2026-08-24): payload root
     # suspended_jobs mirrors onto jobs.status so the next build_payload
     # remembers the suspension (rider c).
@@ -110,6 +115,33 @@ def commit_solution(session, *, instance_row, payload, solution,
 
     session.flush()
     return version
+
+
+def _write_consume_ledger(session, *, iid, version, machine_ids, job_ids,
+                          worker_ids, ops_by_key, solution) -> None:
+    """CONSUME audit rows for every non-frozen committed assignment whose
+    operation carries a BOM (P1 §6.4 ledger; source='commit')."""
+    from coe.db.models.materials import (Material, MaterialTransaction,
+                                         OperationBom)
+
+    mat_by_sku = dict(session.query(Material.sku, Material.id)
+                      .filter(Material.instance_id == iid)
+                      .order_by(Material.sku).all())
+    for a in solution["assignments"]:
+        if a.get("is_frozen"):
+            continue
+        op = ops_by_key[parse_op_id(a["operation_id"])]
+        bom = (session.query(OperationBom.quantity_required, Material.sku)
+               .join(Material, Material.id == OperationBom.material_id)
+               .filter(OperationBom.instance_id == iid,
+                       OperationBom.operation_id == op.id)
+               .order_by(Material.sku).all())
+        for qty, sku in bom:
+            session.add(MaterialTransaction(
+                instance_id=iid, operation_id=op.id,
+                material_id=mat_by_sku[sku], quantity=qty,
+                timestamp=a["start"], transaction_type="CONSUME",
+                source="commit"))
 
 
 def commit_solution_autocommit(instance_name, payload, solution,

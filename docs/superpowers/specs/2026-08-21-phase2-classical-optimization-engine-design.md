@@ -357,6 +357,7 @@ Raw materials are *consumed*, not released when an operation finishes — so inv
 - Determinism: events are emitted in payload iteration order; identical payloads build identical reservoirs.
 
 > **Amendment 2026-08-25 (user-approved): time-phased shortfall warnings.** MATERIAL_SHORTFALL additionally fires when cumulative early-released demand exceeds stock-plus-timely-receipts at some release prefix, even when totals suffice. Dead-block (MATERIAL_UNAVAILABLE) semantics unchanged; warning shape unchanged. Rationale: restores Phase 3 §4.3 step-3 DEFER ("only timing is wrong") reachability.
+> **Amendment 2026-09-12 (day simulator):** for RECOVERY payloads with a reference clock, effective capacity = initial stock − BOM consumed before the clock by frozen completed and in-progress operations; receipts with available_at <= clock are folded into that stock (no double-refill). Baseline semantics unchanged.
 
 ## 7. Material Handling *(restructured by Amendment 2026-08-24)*
 
@@ -365,6 +366,7 @@ Three layers, in order:
 1. **Zero-supply pre-block (builder, unchanged):** a SKU with no stock and no receipts blocks every operation whose BOM references it (`MATERIAL_UNAVAILABLE`), cascading `PREDECESSOR_BLOCKED`. Provably impossible work never reaches the solver.
 2. **Temporal physics (engine, §6.11):** every remaining operation's demand feeds a per-SKU reservoir against capacity = initial stock, with all arrivals present as refill events. The solver resolves receipt-timed conflicts by delaying operations; permanently over-demanded instances return `INFEASIBLE`.
 3. **Advisory totals (builder warning):** when total demand still exceeds total supply for a SKU, the payload records `{type: MATERIAL_SHORTFALL, material_sku, total_supply, total_demand}` as before. It is informational — a heads-up for Phase 3 strategists — and no longer the enforcement mechanism.
+> Note (day-simulator amendment): recovery MATERIAL_SHORTFALL advisory totals remain lifetime (pre-clock history included), not post-clock.
 
 Rationale: aggregate totals are timing-blind — two operations drawing the same stock before a shared receipt pass the totals check while driving inventory negative at t=0. Only the solver sees start times, so only the solver can enforce the floor. Phase 3 reacts to INFEASIBLE results and structured shortfall warnings by suspending or deferring lower-priority jobs through its strategy catalog.
 

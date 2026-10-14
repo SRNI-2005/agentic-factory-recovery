@@ -14,6 +14,7 @@ def main() -> None:
     from coe.dashboard.pages.analytics import render as render_analytics
     from coe.dashboard.pages.history import render as render_runs
     from coe.dashboard.pages.benchmarks import render as render_benchmarks
+    from coe.dashboard.pages.simulate import render as render_simulate
     from coe.db.session import session_scope
 
     st.set_page_config(
@@ -91,13 +92,14 @@ def main() -> None:
     # ---- page navigation ----
     pages = [
         st.Page(render_overview, title="Overview", icon="🏠", url_path="overview", default=True),
-        st.Page(render_configure, title="Configure — Dataset", icon="📊", url_path="dataset"),
+        st.Page(render_configure, title="Configure — Dataset", icon="🔧📊", url_path="dataset"),
         st.Page(render_baseline, title="Baseline Schedule", icon="⚙️", url_path="baseline"),
         st.Page(render_disruption, title="Disruption Simulator", icon="💥", url_path="disruption"),
         st.Page(render_cockpit, title="Cockpit — Recovery", icon="🤖", url_path="recovery"),
-        st.Page(render_analytics, title="Analytics", icon="📈", url_path="analytics"),
+        st.Page(render_analytics, title="Analytics", icon="📊📈", url_path="analytics"),
         st.Page(render_runs, title="Runs — History", icon="📋", url_path="history"),
         st.Page(render_benchmarks, title="Benchmarks", icon="🧪", url_path="benchmarks"),
+        st.Page(render_simulate, title="Simulate", icon="🎬", url_path="simulate"),
     ]
     page = st.navigation(pages)
     page.run()
